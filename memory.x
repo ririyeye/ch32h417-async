@@ -28,6 +28,13 @@ SECTIONS
         _edata = .;
     } > RAM AT > FLASH
 
+    .rtt (NOLOAD) :
+    {
+        *(.rtt)
+        *(.rtt_buf)
+        . = ALIGN(4);
+    } > RAM
+
     .bss (NOLOAD) :
     {
         _sbss = .;

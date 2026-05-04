@@ -3,4 +3,4 @@ target = "riscv32imac-unknown-none-elf"
 
 [target.riscv32imac-unknown-none-elf]
 rustflags = ["-C", "link-arg=-Tmemory.x"]
-runner = ["../probe-rs/target/release/probe-rs", "download", "--chip", "CH32H417", "--chip-erase", "--binary-format", "elf"]
+runner = ["cmd", "/c", "run.bat"]

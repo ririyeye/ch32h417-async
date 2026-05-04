@@ -6,6 +6,8 @@ use core::future::Future;
 use core::pin::Pin;
 use core::ptr::{read_volatile, write_volatile};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+mod rtt;
+
 use panic_halt as _;
 
 // ── Startup ─────────────────────────────────────────────────
@@ -62,7 +64,7 @@ static VTABLE: RawWakerVTable = RawWakerVTable::new(
 
 // ── Hardware SysTick Delay Future ────────────────────────────
 
-struct Delay { until: u32 }
+struct Delay { _until: u32 }
 impl Delay {
     fn ms(ms: u32) -> Self {
         let ticks = HCLK / 1000 * ms;
@@ -74,7 +76,7 @@ impl Delay {
             write_volatile(STK1_CMP as *mut u32, ticks);
             write_volatile(STK1_CTLR as *mut u32, (1 << 2) | (1 << 0));
         }
-        Self { until: ticks }
+        Self { _until: ticks }
     }
 }
 impl Future for Delay {
@@ -98,6 +100,7 @@ impl Drop for Delay {
 // ── Async blink ─────────────────────────────────────────────
 
 async fn blink() {
+    rtt::write_str("[BOOT] blink starting\n");
     unsafe {
         write_volatile(RCC_HB2PCENR as *mut u32, read_volatile(RCC_HB2PCENR as *mut u32) | 0x10);
         let c = GPIOC_CFGLR as *mut u32;
@@ -105,11 +108,22 @@ async fn blink() {
         let s = GPIOC_SPEED as *mut u32;
         write_volatile(s, (read_volatile(s) & !(0xF << 4)) | (0x3 << 4) | (0x3 << 6));
     }
+    const DIAG_ADDR: u32 = 0x200A0500;
+
+    let mut tick: u32 = 0;
     loop {
-        unsafe { write_volatile(GPIOC_BSHR as *mut u32, PC2_SET | PC3_RST); }
-        Delay::ms(500).await;
-        unsafe { write_volatile(GPIOC_BSHR as *mut u32, PC2_RST | PC3_SET); }
-        Delay::ms(500).await;
+        tick += 1;
+        unsafe {
+            write_volatile(DIAG_ADDR as *mut u32, tick);
+            if tick & 1 != 0 {
+                write_volatile(GPIOC_BSHR as *mut u32, PC2_SET | PC3_RST);
+                rtt::write_str("[LED] on\n");
+            } else {
+                write_volatile(GPIOC_BSHR as *mut u32, PC2_RST | PC3_SET);
+                rtt::write_str("[LED] off\n");
+            }
+        }
+        Delay::ms(1000).await;
     }
 }
 
@@ -127,6 +141,8 @@ fn run<F: Future>(f: F) -> F::Output {
 
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
+    rtt::init();
+    rtt::write_str("[BOOT] CH32H417 booted\n");
     run(blink());
     loop {}
 }

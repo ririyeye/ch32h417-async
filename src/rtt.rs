@@ -1,0 +1,80 @@
+//! RTT transport — control block in NOLOAD .rtt, buffer in .rtt_buf.
+//! All fields initialised byte-by-byte at runtime in `init()`.
+
+const BUF_SIZE: usize = 1024;
+
+#[repr(C)]
+struct RttChannel {
+    name:   *const u8,
+    buffer: *mut u8,
+    size:   u32,
+    write:  u32,
+    read:   u32,
+    flags:  u32,
+}
+
+#[repr(C)]
+struct RttControlBlock {
+    id:               [u8; 16],
+    max_up_channels:  u32,
+    max_down_channels: u32,
+    up_channel:       RttChannel,
+}
+
+#[link_section = ".rtt_buf"]
+static mut RTT_BUF: [u8; BUF_SIZE] = [0u8; BUF_SIZE];
+
+#[link_section = ".rtt"]
+#[no_mangle]
+#[used]
+static mut _SEGGER_RTT: RttControlBlock = RttControlBlock {
+    id: [0; 16],
+    max_up_channels: 0,
+    max_down_channels: 0,
+    up_channel: RttChannel {
+        name:   core::ptr::null(),
+        buffer: core::ptr::null_mut(),
+        size:   0,
+        write:  0,
+        read:   0,
+        flags:  0,
+    },
+};
+
+pub fn init() {
+    unsafe {
+        let cb = &raw mut _SEGGER_RTT;
+        // Write the magic ID as four 32-bit words — write_volatile is
+        // proven to work on this target while byte-level raw-pointer
+        // stores through packed structs may be unreliable.
+        let addr = cb as *mut u32;
+        core::ptr::write_volatile(addr,       u32::from_le_bytes(*b"SEGG"));
+        core::ptr::write_volatile(addr.add(1), u32::from_le_bytes(*b"ER R"));
+        core::ptr::write_volatile(addr.add(2), u32::from_le_bytes(*b"TT\0\0"));
+        core::ptr::write_volatile(addr.add(3), u32::from_le_bytes(*b"\0\0\0\0"));
+        // Channel descriptor fields
+        (*cb).max_up_channels = 1;
+        (*cb).max_down_channels = 0;
+        (*cb).up_channel.name    = b"Terminal\0" as *const u8;
+        (*cb).up_channel.buffer  = &raw mut RTT_BUF as *mut u8;
+        (*cb).up_channel.size    = BUF_SIZE as u32;
+        (*cb).up_channel.write   = 0;
+        (*cb).up_channel.read    = 0;
+        (*cb).up_channel.flags   = 0;
+    }
+}
+
+pub fn write_str(s: &str) {
+    unsafe {
+        let cb = &raw mut _SEGGER_RTT;
+        let ch = &raw mut (*cb).up_channel;
+        for &b in s.as_bytes() {
+            let next = ((*ch).write + 1) % (*ch).size;
+            if next == (*ch).read {
+                break;
+            }
+            *(*ch).buffer.add((*ch).write as usize) = b;
+            (*ch).write = next;
+        }
+    }
+}
