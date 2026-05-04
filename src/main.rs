@@ -38,15 +38,21 @@ _start:
     j   3b
 4:
 
-    la t0, _vector_base
-    ori t0, t0, 3
-    csrw mtvec, t0
+    li t0, 0x123703e1
+    csrw 0xbc0, t0
 
-    li t0, 0x00
+    li t0, 0x01
+    csrw 0xbc1, t0
+
+    li t0, 0x07
     csrw 0x804, t0
 
     li t0, 0x6088
     csrw mstatus, t0
+
+    la t0, _vector_base
+    ori t0, t0, 3
+    csrw mtvec, t0
 
     jal zero, rust_main
 "#
@@ -329,6 +335,9 @@ fn run<F: Future>(f: F) -> F::Output {
 #[allow(dead_code)]
 fn systick_interrupt_enable() {
     unsafe {
+        // Set priority 0 for SysTick0 (like C SDK: NVIC_SetPriority(SysTick0_IRQn, 0))
+        let prio_addr = (pac::PFIC_IPRIOR_BASE + pac::SYSTICK0_IRQN as u32) as *mut u8;
+        write_volatile(prio_addr, 0u8);
         // SysTick0 = IRQ 12 (V3F core timer)
         write_volatile(pac::PFIC_IENR0 as *mut u32, 1 << pac::SYSTICK0_IRQN);
         core::arch::asm!("csrs 0x800, {}", in(reg) 0x88u32);
@@ -339,7 +348,7 @@ fn systick_interrupt_enable() {
 pub extern "C" fn rust_main() -> ! {
     rtt::init();
     rtt::write_str("[BOOT] CH32H417 V3F booted\n");
-    // systick_interrupt_enable(); // STIE not yet working on V3F
+    // systick_interrupt_enable(); // V3F interrupt WIP
     run(blink());
     loop {}
 }
