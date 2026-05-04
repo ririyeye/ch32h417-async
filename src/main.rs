@@ -39,6 +39,71 @@ _start:
 "#
 );
 
+// ── Vector table ─────────────────────────────────────────────
+
+global_asm!(
+    r#"
+.section .vector, "ax"
+.align 2
+.globl _vector_base
+_vector_base:
+    .word   _start
+    .word   0
+    .word   default_handler
+    .word   default_handler
+    .word   0
+    .word   default_handler
+    .word   0
+    .word   0
+    .word   default_handler
+    .word   default_handler
+    .word   0
+    .word   0
+    .word   default_handler
+    .word   SysTick1_Handler
+    .word   default_handler
+    .word   0
+    .word   default_handler
+    .word   default_handler
+    .word   default_handler
+    .word   default_handler
+    .word   0
+    .word   0
+    .word   0
+    .word   0
+    .word   0
+    .word   0
+    .word   0
+    .word   0
+    .word   default_handler
+    .word   0
+    .word   0
+    .word   0
+"#
+);
+
+// ── Trap handlers (WCH-Interrupt-fast ABI shims) ──────────────
+
+global_asm!(
+    r#"
+.section .trap, "ax"
+.align 2
+
+.globl SysTick1_Handler
+SysTick1_Handler:
+    addi sp, sp, -4
+    sw   ra, 0(sp)
+    jal  __rust_systick1_handler
+    lw   ra, 0(sp)
+    addi sp, sp, 4
+    mret
+
+.globl default_handler
+default_handler:
+    j default_handler
+"#
+);
+
 // ── CH32H417 Peripherals ────────────────────────────────────
 
 const RCC_HB2PCENR: u32 = pac::RCC_BASE + pac::RCC_HB2PCENR_OFFSET; // 0x4002101C
@@ -51,8 +116,6 @@ const PC2_RST: u32 = 1 << (16 + 2);
 const PC3_SET: u32 = 1 << 3;
 const PC3_RST: u32 = 1 << (16 + 3);
 
-// SysTick1 (V5F core timer) at 0xE000F080
-// SysTick0.ISR at 0xE000F004 bit1 = SysTick1 compare flag
 const STK1_CTLR: u32 = pac::SYSTICK1_BASE + pac::STK_CTLR_OFFSET; // 0xE000F080
 const STK1_CNT: u32 = pac::SYSTICK1_BASE + pac::STK_CNT_OFFSET; // 0xE000F088
 const STK1_CMP: u32 = pac::SYSTICK1_BASE + pac::STK_CMP_OFFSET; // 0xE000F090
@@ -60,6 +123,30 @@ const STK0_ISR: u32 = pac::SYSTICK0_BASE + pac::STK_ISR_OFFSET; // 0xE000F004
 
 /// HCLK frequency in Hz. CH32H417 HSI = 25MHz.
 const HCLK: u32 = pac::HSI_VALUE;
+
+// ── Interrupt handler (not yet wired) ────────────────────────
+
+#[unsafe(no_mangle)]
+extern "C" fn __rust_systick1_handler() {
+    // Placeholder — not yet called since interrupts are disabled
+}
+
+// ── SysTick1 interrupt config ─────────────────────────────────
+
+fn systick_interrupt_enable() {
+    unsafe {
+        // Set priority 0 (highest) for SysTick1 (IRQ 13)
+        let prio_addr = (pac::PFIC_IPRIOR_BASE + pac::SYSTICK1_IRQN as u32) as *mut u8;
+        write_volatile(prio_addr, 0u8);
+
+        // Enable SysTick1 in PFIC IENR0 (bit 13)
+        let ienr0 = pac::PFIC_IENR0 as *mut u32;
+        write_volatile(ienr0, read_volatile(ienr0) | (1 << pac::SYSTICK1_IRQN));
+
+        // Enable global interrupts via CSR 0x800
+        core::arch::asm!("csrs 0x800, {}", in(reg) 0x88u32);
+    }
+}
 
 // ── Waker ────────────────────────────────────────────────────
 
@@ -153,7 +240,7 @@ async fn blink() {
     }
 }
 
-// ── Executor ─────────────────────────────────────────────────
+// ── Executor (with WFI sleep) ─────────────────────────────────
 
 fn run<F: Future>(f: F) -> F::Output {
     let mut f = f;
@@ -171,6 +258,7 @@ fn run<F: Future>(f: F) -> F::Output {
 pub extern "C" fn rust_main() -> ! {
     rtt::init();
     rtt::write_str("[BOOT] CH32H417 booted\n");
+    // systick_interrupt_enable(); // disabled for now — test polling first
     run(blink());
     loop {}
 }

@@ -8,9 +8,19 @@ _stack_start = ORIGIN(RAM) + LENGTH(RAM);
 
 SECTIONS
 {
-    .text :
+    .init :
     {
         *(.init)
+    } > FLASH
+
+    .vector :
+    {
+        *(.vector)
+    } > FLASH
+
+    .text :
+    {
+        *(.trap .trap.*)
         *(.text .text.*)
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
