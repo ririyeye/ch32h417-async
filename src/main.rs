@@ -44,10 +44,10 @@ _start:
     ori t0, t0, 3
     csrw mtvec, t0
 
-    li t0, 0x0F
+    li t0, 0x07
     csrw 0x804, t0
 
-    li t0, 0x1888
+    li t0, 0x6088
     csrw mstatus, t0
 
     jal zero, rust_main
@@ -75,8 +75,8 @@ _vector_base:
     .word   default_handler
     .word   0
     .word   0
+    .word   SysTick0_Handler
     .word   default_handler
-    .word   SysTick1_Handler
     .word   default_handler
     .word   0
     .word   default_handler
@@ -123,10 +123,11 @@ const PC2_RST: u32 = 1 << (16 + 2);
 const PC3_SET: u32 = 1 << 3;
 const PC3_RST: u32 = 1 << (16 + 3);
 
-const STK1_CTLR: u32 = pac::SYSTICK1_BASE + pac::STK_CTLR_OFFSET;
-const STK1_CNT: u32 = pac::SYSTICK1_BASE + pac::STK_CNT_OFFSET;
-const STK1_CMP: u32 = pac::SYSTICK1_BASE + pac::STK_CMP_OFFSET;
-const STK0_ISR: u32 = pac::SYSTICK0_BASE + pac::STK_ISR_OFFSET;
+// SysTick0 (V3F core timer)
+const STK_CTLR: u32 = pac::SYSTICK0_BASE + pac::STK_CTLR_OFFSET;
+const STK_CNT:  u32 = pac::SYSTICK0_BASE + pac::STK_CNT_OFFSET;
+const STK_CMP:  u32 = pac::SYSTICK0_BASE + pac::STK_CMP_OFFSET;
+const STK_ISR:  u32 = pac::SYSTICK0_BASE + pac::STK_ISR_OFFSET;
 
 const HCLK: u32 = pac::HSI_VALUE;
 
@@ -163,11 +164,11 @@ impl TickFlag {
 // ── SysTick1 handler (qingke-rt #[interrupt] macro) ──────────
 
 #[interrupt]
-fn SysTick1_Handler() {
-    let isr = unsafe { read_volatile(STK0_ISR as *const u32) };
-    if isr & (1 << 1) != 0 {
+fn SysTick0_Handler() {
+    let isr = unsafe { read_volatile(STK_ISR as *const u32) };
+    if isr & (1 << 0) != 0 {
         unsafe {
-            write_volatile(STK0_ISR as *mut u32, isr & !(1 << 1));
+            write_volatile(STK_ISR as *mut u32, isr & !(1 << 0));
         }
     }
     TICK_EXPIRED.set();
@@ -193,12 +194,12 @@ impl Delay {
         TICK_EXPIRED.clear();
         unsafe {
             write_volatile(
-                STK0_ISR as *mut u32,
-                read_volatile(STK0_ISR as *mut u32) & !(1 << 1),
+                STK_ISR as *mut u32,
+                read_volatile(STK_ISR as *mut u32) & !(1 << 0),
             );
-            write_volatile(STK1_CNT as *mut u32, 0);
-            write_volatile(STK1_CMP as *mut u32, ticks);
-            write_volatile(STK1_CTLR as *mut u32, (1 << 2) | (1 << 1) | (1 << 0));
+            write_volatile(STK_CNT as *mut u32, 0);
+            write_volatile(STK_CMP as *mut u32, ticks);
+            write_volatile(STK_CTLR as *mut u32, (1 << 2) | (1 << 0) | (1 << 0));
         }
         Self { _until: ticks }
     }
@@ -206,15 +207,15 @@ impl Delay {
 impl Future for Delay {
     type Output = ();
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        let isr = unsafe { read_volatile(STK0_ISR as *const u32) };
-        if TICK_EXPIRED.swap_clear() || (isr & (1 << 1) != 0) {
-            if isr & (1 << 1) != 0 {
+        let isr = unsafe { read_volatile(STK_ISR as *const u32) };
+        if TICK_EXPIRED.swap_clear() || (isr & (1 << 0) != 0) {
+            if isr & (1 << 0) != 0 {
                 unsafe {
-                    write_volatile(STK0_ISR as *mut u32, isr & !(1 << 1));
+                    write_volatile(STK_ISR as *mut u32, isr & !(1 << 0));
                 }
             }
             unsafe {
-                write_volatile(STK1_CTLR as *mut u32, 0);
+                write_volatile(STK_CTLR as *mut u32, 0);
             }
             Poll::Ready(())
         } else {
@@ -225,7 +226,7 @@ impl Future for Delay {
 impl Drop for Delay {
     fn drop(&mut self) {
         unsafe {
-            write_volatile(STK1_CTLR as *mut u32, 0);
+            write_volatile(STK_CTLR as *mut u32, 0);
         }
     }
 }
@@ -242,7 +243,7 @@ async fn blink() {
         let c = GPIOC_CFGLR as *mut u32;
         write_volatile(
             c,
-            (read_volatile(c) & !(0xFF << 8)) | (0x1 << 8) | (0x1 << 12),
+            (read_volatile(c) & !(0xFF << 8)) | (0x1 << 8) | (0x1 << 02),
         );
         let s = GPIOC_SPEED as *mut u32;
         write_volatile(
@@ -286,10 +287,19 @@ fn run<F: Future>(f: F) -> F::Output {
     }
 }
 
+fn systick_interrupt_enable() {
+    unsafe {
+        // SysTick0 = IRQ 12 (V3F core timer)
+        write_volatile(pac::PFIC_IENR0 as *mut u32, 1 << pac::SYSTICK0_IRQN);
+        core::arch::asm!("csrs 0x800, {}", in(reg) 0x88u32);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     rtt::init();
-    rtt::write_str("[BOOT] CH32H417 booted (qingke-rt)\n");
+    rtt::write_str("[BOOT] CH32H417 V3F booted\n");
+    systick_interrupt_enable();
     run(blink());
     loop {}
 }
