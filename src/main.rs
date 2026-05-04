@@ -348,7 +348,7 @@ fn systick_interrupt_enable() {
 pub extern "C" fn rust_main() -> ! {
     rtt::init();
     rtt::write_str("[BOOT] CH32H417 V3F booted\n");
-    // systick_interrupt_enable(); // V3F interrupt WIP
+    // systick_interrupt_enable(); // V3F interrupt under investigation
     run(blink());
     loop {}
 }
