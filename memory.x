@@ -13,7 +13,7 @@ SECTIONS
         *(.init)
     } > FLASH
 
-    .vector :
+    .vector ALIGN(1024) :
     {
         *(.vector)
     } > FLASH

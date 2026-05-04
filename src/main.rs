@@ -244,7 +244,7 @@ impl Delay {
             );
             write_volatile(STK_CNT as *mut u32, 0);
             write_volatile(STK_CMP as *mut u32, ticks);
-            write_volatile(STK_CTLR as *mut u32, (1 << 2) | (1 << 0)); // STIE=0 for now
+            write_volatile(STK_CTLR as *mut u32, 0xF);
         }
         Self { _until: ticks }
     }
@@ -348,7 +348,7 @@ fn systick_interrupt_enable() {
 pub extern "C" fn rust_main() -> ! {
     rtt::init();
     rtt::write_str("[BOOT] CH32H417 V3F booted\n");
-    // systick_interrupt_enable(); // V3F interrupt under investigation
+    systick_interrupt_enable();
     run(blink());
     loop {}
 }
