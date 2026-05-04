@@ -244,7 +244,7 @@ impl Delay {
             );
             write_volatile(STK_CNT as *mut u32, 0);
             write_volatile(STK_CMP as *mut u32, ticks);
-            write_volatile(STK_CTLR as *mut u32, 0xF);
+            write_volatile(STK_CTLR as *mut u32, (1 << 2) | (1 << 1) | (1 << 0)); // one-shot
         }
         Self { _until: ticks }
     }
@@ -325,10 +325,10 @@ fn run<F: Future>(f: F) -> F::Output {
         if let Poll::Ready(v) = pinned.as_mut().poll(&mut cx) {
             return v;
         }
-        // Busy-poll: interrupt just sets the flag, we still spin
         if TICK_EXPIRED.load() {
             continue;
         }
+        unsafe { core::arch::asm!("wfi"); }
     }
 }
 
