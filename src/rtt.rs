@@ -74,3 +74,20 @@ pub fn write_str(s: &str) {
         }
     }
 }
+
+#[allow(dead_code)]
+pub fn write_hex(v: u32) {
+    let mut buf = [0u8; 10]; // "0x" + 8 hex digits
+    buf[0] = b'0';
+    buf[1] = b'x';
+    for i in 0..8 {
+        let nibble = (v >> (28 - 4 * i)) & 0xF;
+        buf[2 + i] = if nibble < 10 {
+            b'0' + nibble as u8
+        } else {
+            b'a' + (nibble - 10) as u8
+        };
+    }
+    let s = unsafe { core::str::from_utf8_unchecked(&buf) };
+    write_str(s);
+}

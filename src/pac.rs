@@ -113,7 +113,7 @@ pub const STK0_ISR_ST0: u32 = 1 << 0; // SysTick0 flag
 pub const STK0_ISR_ST1: u32 = 1 << 1; // SysTick1 flag (in SysTick0.ISR!)
 
 pub const PFIC_SCTLR: u32 = PFIC_BASE + 0xDA0; // System Control Register
-// SCTLR bits
+                                               // SCTLR bits
 pub const SCTLR_WFITOWFE: u32 = 1 << 3; // 0=WFI, 1=WFE
 pub const SCTLR_SEVONPEND: u32 = 1 << 4; // Send Event on Pending
 
