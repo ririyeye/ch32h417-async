@@ -9,6 +9,7 @@ exclude = ["ch32-hal", "embassy"]
 
 [dependencies]
 panic-halt = "0.2.0"
+qingke-rt-macros = "0.6.1"
 
 [profile.release]
 panic = "abort"
