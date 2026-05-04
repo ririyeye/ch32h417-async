@@ -8,6 +8,7 @@ use core::pin::Pin;
 use core::ptr::{read_volatile, write_volatile};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
+mod interrupt;
 mod pac;
 mod rtt;
 
@@ -42,6 +43,9 @@ _start:
     la t0, _vector_base
     ori t0, t0, 3
     csrw mtvec, t0
+
+    li t0, 0x0F
+    csrw 0x804, t0
 
     li t0, 0x1888
     csrw mstatus, t0
@@ -95,58 +99,30 @@ _vector_base:
 "#
 );
 
-// ── Trap handlers (WCH-Interrupt-fast ABI shims) ──────────────
+// ── Default trap handler ─────────────────────────────────────
 
 global_asm!(
     r#"
 .section .trap, "ax"
 .align 2
-
-.globl SysTick1_Handler
-SysTick1_Handler:
-    /* full software save of caller-saved regs */
-    addi sp, sp, -16*4
-    sw ra, 0*4(sp)
-    sw t0, 1*4(sp)
-    sw t1, 2*4(sp)
-    sw t2, 3*4(sp)
-    sw a0, 4*4(sp)
-    sw a1, 5*4(sp)
-    sw a2, 6*4(sp)
-    sw a3, 7*4(sp)
-    sw a4, 8*4(sp)
-    sw a5, 9*4(sp)
-    sw a6, 10*4(sp)
-    sw a7, 11*4(sp)
-    sw t3, 12*4(sp)
-    sw t4, 13*4(sp)
-    sw t5, 14*4(sp)
-    sw t6, 15*4(sp)
-    jal __rust_systick1_handler
-    lw ra, 0*4(sp)
-    lw t0, 1*4(sp)
-    lw t1, 2*4(sp)
-    lw t2, 3*4(sp)
-    lw a0, 4*4(sp)
-    lw a1, 5*4(sp)
-    lw a2, 6*4(sp)
-    lw a3, 7*4(sp)
-    lw a4, 8*4(sp)
-    lw a5, 9*4(sp)
-    lw a6, 10*4(sp)
-    lw a7, 11*4(sp)
-    lw t3, 12*4(sp)
-    lw t4, 13*4(sp)
-    lw t5, 14*4(sp)
-    lw t6, 15*4(sp)
-    addi sp, sp, 16*4
-    mret
-
 .globl default_handler
 default_handler:
     j default_handler
 "#
 );
+
+// ── SysTick1 interrupt handler ───────────────────────────────
+
+interrupt_handler!(SysTick1_Handler, __rust_systick1_handler);
+
+#[unsafe(no_mangle)]
+extern "C" fn __rust_systick1_handler() {
+    let isr = unsafe { read_volatile(STK0_ISR as *const u32) };
+    if isr & (1 << 1) != 0 {
+        unsafe { write_volatile(STK0_ISR as *mut u32, isr & !(1 << 1)); }
+    }
+    TICK_EXPIRED.set();
+}
 
 // ── CH32H417 Peripherals ────────────────────────────────────
 
@@ -196,19 +172,6 @@ impl TickFlag {
             old
         }
     }
-}
-
-// ── Interrupt handler — called from .trap shim ───────────────
-
-#[unsafe(no_mangle)]
-extern "C" fn __rust_systick1_handler() {
-    let isr = unsafe { read_volatile(STK0_ISR as *const u32) };
-    if isr & (1 << 1) != 0 {
-        unsafe {
-            write_volatile(STK0_ISR as *mut u32, isr & !(1 << 1));
-        }
-    }
-    TICK_EXPIRED.set();
 }
 
 // ── SysTick1 interrupt config ─────────────────────────────────
