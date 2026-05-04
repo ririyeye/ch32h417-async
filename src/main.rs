@@ -6,6 +6,8 @@ use core::future::Future;
 use core::pin::Pin;
 use core::ptr::{read_volatile, write_volatile};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+mod pac;
 mod rtt;
 
 use panic_halt as _;
@@ -39,23 +41,25 @@ _start:
 
 // ── CH32H417 Peripherals ────────────────────────────────────
 
-const RCC_HB2PCENR: u32 = 0x4002101C;
-const GPIOC_BASE: u32 = 0x40011000;
-const GPIOC_CFGLR: u32 = GPIOC_BASE + 0x00;
-const GPIOC_BSHR: u32 = GPIOC_BASE + 0x10;
-const GPIOC_SPEED: u32 = GPIOC_BASE + 0x1C;
+const RCC_HB2PCENR: u32 = pac::RCC_BASE + pac::RCC_HB2PCENR_OFFSET; // 0x4002101C
+const GPIOC_BASE: u32 = pac::GPIOC_BASE; // 0x40011000
+const GPIOC_CFGLR: u32 = GPIOC_BASE + pac::GPIO_CFGLR_OFFSET; // 0x40011000
+const GPIOC_BSHR: u32 = GPIOC_BASE + pac::GPIO_BSHR_OFFSET; // 0x40011010
+const GPIOC_SPEED: u32 = GPIOC_BASE + pac::GPIO_SPEED_OFFSET; // 0x4001101C
 const PC2_SET: u32 = 1 << 2;
 const PC2_RST: u32 = 1 << (16 + 2);
 const PC3_SET: u32 = 1 << 3;
 const PC3_RST: u32 = 1 << (16 + 3);
 
 // SysTick1 (V5F core timer) at 0xE000F080
-const STK1_CTLR: u32 = 0xE000F080;
-const STK1_CNT: u32 = 0xE000F088;
-const STK1_CMP: u32 = 0xE000F090;
-const STK0_ISR: u32 = 0xE000F004;
+// SysTick0.ISR at 0xE000F004 bit1 = SysTick1 compare flag
+const STK1_CTLR: u32 = pac::SYSTICK1_BASE + pac::STK_CTLR_OFFSET; // 0xE000F080
+const STK1_CNT: u32 = pac::SYSTICK1_BASE + pac::STK_CNT_OFFSET; // 0xE000F088
+const STK1_CMP: u32 = pac::SYSTICK1_BASE + pac::STK_CMP_OFFSET; // 0xE000F090
+const STK0_ISR: u32 = pac::SYSTICK0_BASE + pac::STK_ISR_OFFSET; // 0xE000F004
 
-const HCLK: u32 = 25_000_000;
+/// HCLK frequency in Hz. CH32H417 HSI = 25MHz.
+const HCLK: u32 = pac::HSI_VALUE;
 
 // ── Waker ────────────────────────────────────────────────────
 
@@ -75,10 +79,12 @@ impl Delay {
     fn ms(ms: u32) -> Self {
         let ticks = HCLK / 1000 * ms;
         unsafe {
+            // Clear previous flag
             write_volatile(
                 STK0_ISR as *mut u32,
                 read_volatile(STK0_ISR as *mut u32) & !(1 << 1),
             );
+            // Reset counter, set compare, enable with HCLK source
             write_volatile(STK1_CNT as *mut u32, 0);
             write_volatile(STK1_CMP as *mut u32, ticks);
             write_volatile(STK1_CTLR as *mut u32, (1 << 2) | (1 << 0));
@@ -93,7 +99,7 @@ impl Future for Delay {
         if isr & (1 << 1) != 0 {
             unsafe {
                 write_volatile(STK1_CTLR as *mut u32, 0);
-            }
+            } // disable timer
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -137,14 +143,12 @@ async fn blink() {
             write_volatile(DIAG_ADDR as *mut u32, tick);
             if tick & 1 != 0 {
                 write_volatile(GPIOC_BSHR as *mut u32, PC2_SET | PC3_RST);
-                rtt::write_str("[LED] on  #");
+                rtt::write_str("[LED] on\n");
             } else {
                 write_volatile(GPIOC_BSHR as *mut u32, PC2_RST | PC3_SET);
-                rtt::write_str("[LED] off #");
+                rtt::write_str("[LED] off\n");
             }
         }
-        rtt::write_u32(tick);
-        rtt::write_str("\n");
         Delay::ms(1000).await;
     }
 }

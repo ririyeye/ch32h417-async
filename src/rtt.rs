@@ -1,7 +1,5 @@
-//! RTT transport — raw string writes via write_volatile.
-//! Channel name "Terminal" so probe-rs displays as plain text.
-
-use core::ptr::write_volatile;
+//! RTT transport — control block in NOLOAD .rtt, buffer in .rtt_buf.
+//! All fields initialised byte-by-byte at runtime in `init()`.
 
 const BUF_SIZE: usize = 1024;
 
@@ -47,10 +45,10 @@ pub fn init() {
     unsafe {
         let cb = &raw mut _SEGGER_RTT;
         let addr = cb as *mut u32;
-        write_volatile(addr, u32::from_le_bytes(*b"SEGG"));
-        write_volatile(addr.add(1), u32::from_le_bytes(*b"ER R"));
-        write_volatile(addr.add(2), u32::from_le_bytes(*b"TT\0\0"));
-        write_volatile(addr.add(3), u32::from_le_bytes(*b"\0\0\0\0"));
+        core::ptr::write_volatile(addr, u32::from_le_bytes(*b"SEGG"));
+        core::ptr::write_volatile(addr.add(1), u32::from_le_bytes(*b"ER R"));
+        core::ptr::write_volatile(addr.add(2), u32::from_le_bytes(*b"TT\0\0"));
+        core::ptr::write_volatile(addr.add(3), u32::from_le_bytes(*b"\0\0\0\0"));
         (*cb).max_up_channels = 1;
         (*cb).max_down_channels = 0;
         (*cb).up_channel.name = b"Terminal\0" as *const u8;
@@ -62,45 +60,17 @@ pub fn init() {
     }
 }
 
-/// Write a single byte. Returns false if buffer full.
-unsafe fn write_byte(b: u8) {
-    let cb = &raw mut _SEGGER_RTT;
-    let ch = &raw mut (*cb).up_channel;
-    let next = ((*ch).write + 1) % (*ch).size;
-    if next == (*ch).read {
-        return;
-    }
-    write_volatile((*ch).buffer.add((*ch).write as usize), b);
-    (*ch).write = next;
-}
-
 pub fn write_str(s: &str) {
-    for &b in s.as_bytes() {
-        unsafe {
-            write_byte(b);
+    unsafe {
+        let cb = &raw mut _SEGGER_RTT;
+        let ch = &raw mut (*cb).up_channel;
+        for &b in s.as_bytes() {
+            let next = ((*ch).write + 1) % (*ch).size;
+            if next == (*ch).read {
+                break;
+            }
+            *(*ch).buffer.add((*ch).write as usize) = b;
+            (*ch).write = next;
         }
-    }
-}
-
-/// Write u32 as decimal, most-significant-digit first. No stack buffer.
-pub fn write_u32(mut n: u32) {
-    if n == 0 {
-        unsafe {
-            write_byte(b'0');
-        }
-        return;
-    }
-    // find the highest divisor
-    let mut div: u32 = 1;
-    while n / div >= 10 {
-        div *= 10;
-    }
-    while div > 0 {
-        let d = (n / div) as u8;
-        unsafe {
-            write_byte(b'0' + d);
-        }
-        n -= (d as u32) * div;
-        div /= 10;
     }
 }
