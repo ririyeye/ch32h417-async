@@ -243,7 +243,7 @@ async fn blink() {
         let c = GPIOC_CFGLR as *mut u32;
         write_volatile(
             c,
-            (read_volatile(c) & !(0xFF << 8)) | (0x1 << 8) | (0x1 << 02),
+            (read_volatile(c) & !(0xFF << 8)) | (0x1 << 8) | (0x1 << 12),
         );
         let s = GPIOC_SPEED as *mut u32;
         write_volatile(
