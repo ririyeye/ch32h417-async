@@ -2,6 +2,7 @@
 #![no_main]
 
 use core::arch::global_asm;
+use core::cell::UnsafeCell;
 use core::future::Future;
 use core::pin::Pin;
 use core::ptr::{read_volatile, write_volatile};
@@ -18,6 +19,7 @@ global_asm!(
     r#"
 .section .init, "ax"
 .globl _start
+.align 2
 _start:
     la sp, _stack_start
     la t0, _sbss
@@ -35,7 +37,16 @@ _start:
     addi t0, t0, 4
     addi t2, t2, 4
     j   3b
-4:  jal zero, rust_main
+4:
+
+    la t0, _vector_base
+    ori t0, t0, 3
+    csrw mtvec, t0
+
+    li t0, 0x1888
+    csrw mstatus, t0
+
+    jal zero, rust_main
 "#
 );
 
@@ -44,8 +55,9 @@ _start:
 global_asm!(
     r#"
 .section .vector, "ax"
-.align 2
+.align 1
 .globl _vector_base
+.option norvc
 _vector_base:
     .word   _start
     .word   0
@@ -79,6 +91,7 @@ _vector_base:
     .word   0
     .word   0
     .word   0
+.option rvc
 "#
 );
 
@@ -91,11 +104,42 @@ global_asm!(
 
 .globl SysTick1_Handler
 SysTick1_Handler:
-    addi sp, sp, -4
-    sw   ra, 0(sp)
-    jal  __rust_systick1_handler
-    lw   ra, 0(sp)
-    addi sp, sp, 4
+    /* full software save of caller-saved regs */
+    addi sp, sp, -16*4
+    sw ra, 0*4(sp)
+    sw t0, 1*4(sp)
+    sw t1, 2*4(sp)
+    sw t2, 3*4(sp)
+    sw a0, 4*4(sp)
+    sw a1, 5*4(sp)
+    sw a2, 6*4(sp)
+    sw a3, 7*4(sp)
+    sw a4, 8*4(sp)
+    sw a5, 9*4(sp)
+    sw a6, 10*4(sp)
+    sw a7, 11*4(sp)
+    sw t3, 12*4(sp)
+    sw t4, 13*4(sp)
+    sw t5, 14*4(sp)
+    sw t6, 15*4(sp)
+    jal __rust_systick1_handler
+    lw ra, 0*4(sp)
+    lw t0, 1*4(sp)
+    lw t1, 2*4(sp)
+    lw t2, 3*4(sp)
+    lw a0, 4*4(sp)
+    lw a1, 5*4(sp)
+    lw a2, 6*4(sp)
+    lw a3, 7*4(sp)
+    lw a4, 8*4(sp)
+    lw a5, 9*4(sp)
+    lw a6, 10*4(sp)
+    lw a7, 11*4(sp)
+    lw t3, 12*4(sp)
+    lw t4, 13*4(sp)
+    lw t5, 14*4(sp)
+    lw t6, 15*4(sp)
+    addi sp, sp, 16*4
     mret
 
 .globl default_handler
@@ -124,26 +168,54 @@ const STK0_ISR: u32 = pac::SYSTICK0_BASE + pac::STK_ISR_OFFSET; // 0xE000F004
 /// HCLK frequency in Hz. CH32H417 HSI = 25MHz.
 const HCLK: u32 = pac::HSI_VALUE;
 
-// ── Interrupt handler (not yet wired) ────────────────────────
+// ── Tick flag (UnsafeCell avoids AtomicBool LR/SC issues) ────
+
+struct TickFlag(UnsafeCell<bool>);
+unsafe impl Sync for TickFlag {}
+
+static TICK_EXPIRED: TickFlag = TickFlag(UnsafeCell::new(false));
+
+impl TickFlag {
+    fn set(&self) {
+        unsafe {
+            write_volatile(self.0.get(), true);
+        }
+    }
+    fn clear(&self) {
+        unsafe {
+            write_volatile(self.0.get(), false);
+        }
+    }
+    fn load(&self) -> bool {
+        unsafe { read_volatile(self.0.get()) }
+    }
+    fn swap_clear(&self) -> bool {
+        unsafe {
+            let old = read_volatile(self.0.get());
+            write_volatile(self.0.get(), false);
+            old
+        }
+    }
+}
+
+// ── Interrupt handler — called from .trap shim ───────────────
 
 #[unsafe(no_mangle)]
 extern "C" fn __rust_systick1_handler() {
-    // Placeholder — not yet called since interrupts are disabled
+    let isr = unsafe { read_volatile(STK0_ISR as *const u32) };
+    if isr & (1 << 1) != 0 {
+        unsafe {
+            write_volatile(STK0_ISR as *mut u32, isr & !(1 << 1));
+        }
+    }
+    TICK_EXPIRED.set();
 }
 
 // ── SysTick1 interrupt config ─────────────────────────────────
 
 fn systick_interrupt_enable() {
     unsafe {
-        // Set priority 0 (highest) for SysTick1 (IRQ 13)
-        let prio_addr = (pac::PFIC_IPRIOR_BASE + pac::SYSTICK1_IRQN as u32) as *mut u8;
-        write_volatile(prio_addr, 0u8);
-
-        // Enable SysTick1 in PFIC IENR0 (bit 13)
-        let ienr0 = pac::PFIC_IENR0 as *mut u32;
-        write_volatile(ienr0, read_volatile(ienr0) | (1 << pac::SYSTICK1_IRQN));
-
-        // Enable global interrupts via CSR 0x800
+        // Enable global interrupts via CSR 0x800 (QingKe GINTR)
         core::arch::asm!("csrs 0x800, {}", in(reg) 0x88u32);
     }
 }
@@ -165,16 +237,15 @@ struct Delay {
 impl Delay {
     fn ms(ms: u32) -> Self {
         let ticks = HCLK / 1000 * ms;
+        TICK_EXPIRED.clear();
         unsafe {
-            // Clear previous flag
             write_volatile(
                 STK0_ISR as *mut u32,
                 read_volatile(STK0_ISR as *mut u32) & !(1 << 1),
             );
-            // Reset counter, set compare, enable with HCLK source
             write_volatile(STK1_CNT as *mut u32, 0);
             write_volatile(STK1_CMP as *mut u32, ticks);
-            write_volatile(STK1_CTLR as *mut u32, (1 << 2) | (1 << 0));
+            write_volatile(STK1_CTLR as *mut u32, (1 << 2) | (1 << 1) | (1 << 0));
         }
         Self { _until: ticks }
     }
@@ -182,11 +253,17 @@ impl Delay {
 impl Future for Delay {
     type Output = ();
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        // Check interrupt flag first, then fallback to ISR polling
         let isr = unsafe { read_volatile(STK0_ISR as *const u32) };
-        if isr & (1 << 1) != 0 {
+        if TICK_EXPIRED.swap_clear() || (isr & (1 << 1) != 0) {
+            if isr & (1 << 1) != 0 {
+                unsafe {
+                    write_volatile(STK0_ISR as *mut u32, isr & !(1 << 1));
+                }
+            }
             unsafe {
                 write_volatile(STK1_CTLR as *mut u32, 0);
-            } // disable timer
+            }
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -251,6 +328,9 @@ fn run<F: Future>(f: F) -> F::Output {
         if let Poll::Ready(v) = pinned.as_mut().poll(&mut cx) {
             return v;
         }
+        if TICK_EXPIRED.load() {
+            continue;
+        }
     }
 }
 
@@ -258,7 +338,7 @@ fn run<F: Future>(f: F) -> F::Output {
 pub extern "C" fn rust_main() -> ! {
     rtt::init();
     rtt::write_str("[BOOT] CH32H417 booted\n");
-    // systick_interrupt_enable(); // disabled for now — test polling first
+    systick_interrupt_enable();
     run(blink());
     loop {}
 }
