@@ -8,6 +8,8 @@ use core::pin::Pin;
 use core::ptr::{read_volatile, write_volatile};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
+use qingke_rt_macros::interrupt;
+
 mod pac;
 mod rtt;
 
@@ -145,6 +147,11 @@ unsafe impl Sync for TickFlag {}
 static TICK_EXPIRED: TickFlag = TickFlag(UnsafeCell::new(false));
 
 impl TickFlag {
+    fn set(&self) {
+        unsafe {
+            write_volatile(self.0.get(), true);
+        }
+    }
     fn clear(&self) {
         unsafe {
             write_volatile(self.0.get(), false);
@@ -162,62 +169,18 @@ impl TickFlag {
     }
 }
 
-// ── SysTick0 handler (full software save, no HPE dependency) ─
+// ── SysTick0 handler (HPE saves caller-saved regs; macro saves ra) ─
 
-global_asm!(
-    r#"
-.section .text, "ax"
-.globl SysTick0_Handler
-SysTick0_Handler:
-    addi sp, sp, -68
-    sw   ra,  0(sp)
-    sw   t0,  4(sp)
-    sw   t1,  8(sp)
-    sw   t2, 12(sp)
-    sw   t3, 16(sp)
-    sw   t4, 20(sp)
-    sw   t5, 24(sp)
-    sw   t6, 28(sp)
-    sw   a0, 32(sp)
-    sw   a1, 36(sp)
-    sw   a2, 40(sp)
-    sw   a3, 44(sp)
-    sw   a4, 48(sp)
-    sw   a5, 52(sp)
-    sw   a6, 56(sp)
-    sw   a7, 60(sp)
-
-    lui  t0, 0xe000f
-    lw   t1, 4(t0)
-    andi t2, t1, 1
-    beqz t2, 1f
-    andi t1, t1, -2
-    sw   t1, 4(t0)
-1:
-    lui  t0, 0x200a0
-    li   t1, 1
-    sb   t1, 0x430(t0)
-
-    lw   ra,  0(sp)
-    lw   t0,  4(sp)
-    lw   t1,  8(sp)
-    lw   t2, 12(sp)
-    lw   t3, 16(sp)
-    lw   t4, 20(sp)
-    lw   t5, 24(sp)
-    lw   t6, 28(sp)
-    lw   a0, 32(sp)
-    lw   a1, 36(sp)
-    lw   a2, 40(sp)
-    lw   a3, 44(sp)
-    lw   a4, 48(sp)
-    lw   a5, 52(sp)
-    lw   a6, 56(sp)
-    lw   a7, 60(sp)
-    addi sp, sp, 68
-    mret
-"#
-);
+#[interrupt]
+fn SysTick0_Handler() {
+    let isr = unsafe { read_volatile(STK_ISR as *const u32) };
+    if isr & (1 << 0) != 0 {
+        unsafe {
+            write_volatile(STK_ISR as *mut u32, isr & !(1 << 0));
+        }
+    }
+    TICK_EXPIRED.set();
+}
 
 // ── Waker ────────────────────────────────────────────────────
 
@@ -332,7 +295,6 @@ fn run<F: Future>(f: F) -> F::Output {
     }
 }
 
-#[allow(dead_code)]
 fn systick_interrupt_enable() {
     unsafe {
         // Set priority 0 for SysTick0 (like C SDK: NVIC_SetPriority(SysTick0_IRQn, 0))

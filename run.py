@@ -13,6 +13,11 @@ def main():
     elf = sys.argv[1]
     timeout = float(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_TIMEOUT
 
+    # Recovery: wlink erase resets chip state via WCH firmware,
+    # bypassing the Debug Module (which may be stuck after Ctrl+C).
+    print("-- wlink erase (recovery) --")
+    subprocess.run(["wlink", "erase"], check=True)
+
     # Flash
     print("-- Flashing --")
     subprocess.run([PROBE_RS, "download", "--chip", CHIP, "--chip-erase", elf], check=True)
