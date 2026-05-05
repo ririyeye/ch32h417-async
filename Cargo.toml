@@ -5,12 +5,11 @@ edition = "2021"
 
 [workspace]
 members = ["."]
-exclude = ["ch32-hal", "embassy"]
+exclude = ["ch32-hal", "embassy", "ch32-hal/examples"]
 
 [dependencies]
 panic-halt = "0.2.0"
 qingke-rt-macros = "0.6.1"
-# embassy-executor = { path = "embassy/embassy-executor", default-features = false, features = ["platform-spin", "executor-thread"] }
 critical-section = "1.1"
 
 [profile.release]
