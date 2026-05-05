@@ -135,20 +135,37 @@ pub const PFIC_SCTLR: u32 = PFIC_BASE + 0xD10; // System Control Register
 pub const SCTLR_WFITOWFE: u32 = 1 << 3; // 0=WFI, 1=WFE
 pub const SCTLR_SEVONPEND: u32 = 1 << 4; // Send Event on Pending
 
-// ── PFIC / NVIC registers ───────────────────────────────────────
+// ── PFIC registers (QingKe interrupt controller) ─────────────────
+// Naming follows CH32H417 Reference Manual (R32_PFIC_xxx, indexed from 1).
+// Each 32-bit IENR/IRER/IPSR/IPRR register covers 32 IRQ numbers.
+//
+// IRQ range per IENR index:  1→0-31, 2→32-63, 3→64-95, 4→96-127, 5→128-159
 
-pub const PFIC_IENR0: u32 = PFIC_BASE + 0x100; // Interrupt Enable, IRQ 0-31
-pub const PFIC_IENR1: u32 = PFIC_BASE + 0x104; // IRQ 32-63
-pub const PFIC_IENR2: u32 = PFIC_BASE + 0x108; // IRQ 64-95
-pub const PFIC_IENR3: u32 = PFIC_BASE + 0x10C; // IRQ 96-127
-pub const PFIC_IENR4: u32 = PFIC_BASE + 0x110; // IRQ 128-159
+pub const PFIC_IENR1: u32 = PFIC_BASE + 0x100; // Interrupt Enable Set, IRQ 0-31
+pub const PFIC_IENR2: u32 = PFIC_BASE + 0x104; // IRQ 32-63
+pub const PFIC_IENR3: u32 = PFIC_BASE + 0x108; // IRQ 64-95
+pub const PFIC_IENR4: u32 = PFIC_BASE + 0x10C; // IRQ 96-127
+pub const PFIC_IENR5: u32 = PFIC_BASE + 0x110; // IRQ 128-159
 
-pub const PFIC_IRER0: u32 = PFIC_BASE + 0x180; // Interrupt Reset Enable
-pub const PFIC_IRER1: u32 = PFIC_BASE + 0x184;
-pub const PFIC_IPSR0: u32 = PFIC_BASE + 0x200; // Interrupt Pending Set
-pub const PFIC_IPRR0: u32 = PFIC_BASE + 0x280; // Interrupt Pending Reset
+pub const PFIC_IRER1: u32 = PFIC_BASE + 0x180; // Interrupt Enable Reset (disable), IRQ 0-31
+pub const PFIC_IRER2: u32 = PFIC_BASE + 0x184; // IRQ 32-63
+pub const PFIC_IRER3: u32 = PFIC_BASE + 0x188; // IRQ 64-95
+pub const PFIC_IRER4: u32 = PFIC_BASE + 0x18C; // IRQ 96-127
+pub const PFIC_IRER5: u32 = PFIC_BASE + 0x190; // IRQ 128-159
 
-pub const PFIC_IPRIOR_BASE: u32 = PFIC_BASE + 0x400; // 256 bytes of u8 priority
+pub const PFIC_IPSR1: u32 = PFIC_BASE + 0x200; // Interrupt Pending Set, IRQ 0-31
+pub const PFIC_IPSR2: u32 = PFIC_BASE + 0x204; // IRQ 32-63
+pub const PFIC_IPSR3: u32 = PFIC_BASE + 0x208; // IRQ 64-95
+pub const PFIC_IPSR4: u32 = PFIC_BASE + 0x20C; // IRQ 96-127
+pub const PFIC_IPSR5: u32 = PFIC_BASE + 0x210; // IRQ 128-159
+
+pub const PFIC_IPRR1: u32 = PFIC_BASE + 0x280; // Interrupt Pending Reset (clear), IRQ 0-31
+pub const PFIC_IPRR2: u32 = PFIC_BASE + 0x284; // IRQ 32-63
+pub const PFIC_IPRR3: u32 = PFIC_BASE + 0x288; // IRQ 64-95
+pub const PFIC_IPRR4: u32 = PFIC_BASE + 0x28C; // IRQ 96-127
+pub const PFIC_IPRR5: u32 = PFIC_BASE + 0x290; // IRQ 128-159
+
+pub const PFIC_IPRIOR_BASE: u32 = PFIC_BASE + 0x400; // 256 bytes u8 priority, IRQ 0-255
 
 // ── Interrupt numbers (from C SDK IRQn_Type) ────────────────────
 

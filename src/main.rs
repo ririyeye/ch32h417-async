@@ -306,7 +306,7 @@ fn systick_interrupt_enable() {
         let prio_addr = (pac::PFIC_IPRIOR_BASE + pac::SYSTICK0_IRQN as u32) as *mut u8;
         write_volatile(prio_addr, 0u8);
         // SysTick0 = IRQ 12 (V3F core timer)
-        write_volatile(pac::PFIC_IENR0 as *mut u32, 1 << pac::SYSTICK0_IRQN);
+        write_volatile(pac::PFIC_IENR1 as *mut u32, 1 << pac::SYSTICK0_IRQN);
         core::arch::asm!("csrs 0x800, {}", in(reg) 0x88u32);
     }
 }
