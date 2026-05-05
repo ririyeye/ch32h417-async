@@ -16,6 +16,44 @@ mod rtt;
 
 use panic_halt as _;
 
+// ── Critical section (nesting-safe) ──────────────────────
+
+struct CriticalSection;
+critical_section::set_impl!(CriticalSection);
+
+struct CsState {
+    depth: UnsafeCell<u32>,
+    saved_mie: UnsafeCell<u32>,
+}
+unsafe impl Sync for CsState {}
+static CS: CsState = CsState {
+    depth: UnsafeCell::new(0),
+    saved_mie: UnsafeCell::new(0),
+};
+
+unsafe impl critical_section::Impl for CriticalSection {
+    unsafe fn acquire() {
+        let n = read_volatile(CS.depth.get());
+        if n == 0 {
+            let ms: u32;
+            core::arch::asm!("csrrci {0}, mstatus, 0x8", out(reg) ms);
+            write_volatile(CS.saved_mie.get(), ms & 0x8);
+        }
+        write_volatile(CS.depth.get(), n + 1);
+    }
+    unsafe fn release(_: ()) {
+        let n = read_volatile(CS.depth.get());
+        write_volatile(CS.depth.get(), n - 1);
+        if n == 1 && read_volatile(CS.saved_mie.get()) != 0 {
+            // Clear pending PFIC before re-enabling MIE
+            for i in 0..5 {
+                write_volatile((pac::PFIC_IPRR1 + i * 4) as *mut u32, !0u32);
+            }
+            core::arch::asm!("csrsi mstatus, 0x8");
+        }
+    }
+}
+
 // ── Startup (custom .init section — qingke-rt's .init is discarded) ─
 
 global_asm!(
@@ -128,7 +166,6 @@ const GPIOC_SPEED: u32 = GPIOC_BASE + pac::GPIO_SPEED_OFFSET;
 const PC2_OUT: u32 = 1 << 2;
 const PC3_OUT: u32 = 1 << 3;
 
-// SysTick0 (V3F core timer)
 const STK_CTLR: u32 = pac::SYSTICK0_BASE + pac::STK_CTLR_OFFSET;
 const STK_CNT: u32 = pac::SYSTICK0_BASE + pac::STK_CNT_OFFSET;
 const STK_CMP: u32 = pac::SYSTICK0_BASE + pac::STK_CMP_OFFSET;
@@ -139,7 +176,7 @@ const RCC_PLLCFGR: u32 = pac::RCC_BASE + pac::RCC_PLLCFGR_OFFSET;
 
 const DIAG_ADDR: u32 = 0x200A0500;
 
-// ── Tick flag + waker (ISR ↔ Delay future) ──────────────
+// ── Tick flag + waker ────────────────────────────────────
 
 struct TickFlag(UnsafeCell<bool>);
 unsafe impl Sync for TickFlag {}
@@ -151,16 +188,8 @@ unsafe impl Sync for DelayWaker {}
 static DELAY_WAKER: DelayWaker = DelayWaker(UnsafeCell::new(None));
 
 impl TickFlag {
-    fn set(&self) {
-        unsafe {
-            write_volatile(self.0.get(), true);
-        }
-    }
-    fn clear(&self) {
-        unsafe {
-            write_volatile(self.0.get(), false);
-        }
-    }
+    fn set(&self) { unsafe { write_volatile(self.0.get(), true); } }
+    fn clear(&self) { unsafe { write_volatile(self.0.get(), false); } }
     fn swap_clear(&self) -> bool {
         unsafe {
             let old = read_volatile(self.0.get());
@@ -176,12 +205,9 @@ impl TickFlag {
 fn SysTick0_Handler() {
     let isr = unsafe { read_volatile(STK_ISR as *const u32) };
     if isr & (1 << 0) != 0 {
-        unsafe {
-            write_volatile(STK_ISR as *mut u32, isr & !(1 << 0));
-        }
+        unsafe { write_volatile(STK_ISR as *mut u32, isr & !(1 << 0)); }
     }
     TICK_EXPIRED.set();
-    // Wake the task that's waiting on Delay
     unsafe {
         if let Some(waker) = (*DELAY_WAKER.0.get()).as_ref() {
             waker.wake_by_ref();
@@ -189,7 +215,7 @@ fn SysTick0_Handler() {
     }
 }
 
-// ── Delay (embassy-compatible waker chain) ───────────────
+// ── Delay ────────────────────────────────────────────────
 
 struct Delay {
     ticks: u32,
@@ -199,10 +225,7 @@ struct Delay {
 impl Delay {
     fn ms(ms: u32) -> Self {
         let hclk = unsafe { pac::HCLK };
-        Self {
-            ticks: hclk / 1000 * ms,
-            started: false,
-        }
+        Self { ticks: hclk / 1000 * ms, started: false }
     }
 }
 
@@ -211,30 +234,20 @@ impl Future for Delay {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         if !self.started {
             self.started = true;
-            // Register waker so ISR can wake us
-            unsafe {
-                *DELAY_WAKER.0.get() = Some(cx.waker().clone());
-            }
+            unsafe { *DELAY_WAKER.0.get() = Some(cx.waker().clone()); }
             TICK_EXPIRED.clear();
             unsafe {
-                write_volatile(
-                    STK_ISR as *mut u32,
-                    read_volatile(STK_ISR as *const u32) & !(1 << 0),
-                );
+                write_volatile(STK_ISR as *mut u32, read_volatile(STK_ISR as *const u32) & !(1 << 0));
                 write_volatile(STK_CNT as *mut u32, 0);
                 write_volatile(STK_CMP as *mut u32, self.ticks);
                 write_volatile(STK_CTLR as *mut u32, (1 << 2) | (1 << 1) | (1 << 0));
             }
             Poll::Pending
         } else if TICK_EXPIRED.swap_clear() {
-            unsafe {
-                write_volatile(STK_CTLR as *mut u32, 0);
-            }
+            unsafe { write_volatile(STK_CTLR as *mut u32, 0); }
             Poll::Ready(())
         } else {
-            unsafe {
-                *DELAY_WAKER.0.get() = Some(cx.waker().clone());
-            }
+            unsafe { *DELAY_WAKER.0.get() = Some(cx.waker().clone()); }
             Poll::Pending
         }
     }
@@ -242,9 +255,7 @@ impl Future for Delay {
 
 impl Drop for Delay {
     fn drop(&mut self) {
-        unsafe {
-            write_volatile(STK_CTLR as *mut u32, 0);
-        }
+        unsafe { write_volatile(STK_CTLR as *mut u32, 0); }
     }
 }
 
@@ -253,20 +264,11 @@ impl Drop for Delay {
 async fn blink() {
     rtt::write_str("[BOOT] blink starting\n");
     unsafe {
-        write_volatile(
-            RCC_HB2PCENR as *mut u32,
-            read_volatile(RCC_HB2PCENR as *mut u32) | 0x10,
-        );
+        write_volatile(RCC_HB2PCENR as *mut u32, read_volatile(RCC_HB2PCENR as *mut u32) | 0x10);
         let c = GPIOC_CFGLR as *mut u32;
-        write_volatile(
-            c,
-            (read_volatile(c) & !(0xFF << 8)) | (0x1 << 8) | (0x1 << 12),
-        );
+        write_volatile(c, (read_volatile(c) & !(0xFF << 8)) | (0x1 << 8) | (0x1 << 12));
         let s = GPIOC_SPEED as *mut u32;
-        write_volatile(
-            s,
-            (read_volatile(s) & !(0xF << 4)) | (0x3 << 4) | (0x3 << 6),
-        );
+        write_volatile(s, (read_volatile(s) & !(0xF << 4)) | (0x3 << 4) | (0x3 << 6));
     }
 
     let mut tick: u32 = 0;
@@ -287,17 +289,11 @@ async fn blink() {
 }
 
 // ── Executor ─────────────────────────────────────────────
-//
-//  Uses a proper waker chain: Delay stores cx.waker() → ISR calls
-//  waker.wake_by_ref() → task re-polled. This matches how embassy's
-//  waker works, just without the multi-task run-queue.
 
 fn run<F: Future>(f: F) -> F::Output {
     let mut f = f;
     let mut pinned = unsafe { Pin::new_unchecked(&mut f) };
     loop {
-        // Build a real waker that stores itself in DELAY_WAKER
-        // (Delay::poll will overwrite it with cx.waker())
         let waker = unsafe {
             Waker::from_raw(core::task::RawWaker::new(
                 core::ptr::null(),
@@ -313,14 +309,10 @@ fn run<F: Future>(f: F) -> F::Output {
         if let Poll::Ready(v) = pinned.as_mut().poll(&mut cx) {
             return v;
         }
-        // WFI — but first check if tick already expired
-        // (ISR may have fired between poll and check)
         if TICK_EXPIRED.swap_clear() {
             continue;
         }
-        unsafe {
-            core::arch::asm!("wfi");
-        }
+        unsafe { core::arch::asm!("wfi"); }
     }
 }
 
@@ -344,10 +336,7 @@ fn systick_interrupt_enable() {
 
 fn clock_init() {
     unsafe {
-        write_volatile(
-            RCC_PLLCFGR as *mut u32,
-            read_volatile(RCC_PLLCFGR as *const u32) & !pac::RCC_PLLCFGR_SYSPLL_GATE,
-        );
+        write_volatile(RCC_PLLCFGR as *mut u32, read_volatile(RCC_PLLCFGR as *const u32) & !pac::RCC_PLLCFGR_SYSPLL_GATE);
         let mut cfgr = read_volatile(RCC_CFGR0 as *const u32);
         cfgr &= !0x3u32;
         cfgr &= !(0xFFu32 | (0x3 << 16));
