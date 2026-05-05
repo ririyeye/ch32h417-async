@@ -135,7 +135,8 @@ const STK_CNT: u32 = pac::SYSTICK0_BASE + pac::STK_CNT_OFFSET;
 const STK_CMP: u32 = pac::SYSTICK0_BASE + pac::STK_CMP_OFFSET;
 const STK_ISR: u32 = pac::SYSTICK0_BASE + pac::STK_ISR_OFFSET;
 
-const HCLK: u32 = pac::HSI_VALUE;
+const RCC_CFGR0: u32 = pac::RCC_BASE + pac::RCC_CFGR0_OFFSET;
+const RCC_PLLCFGR: u32 = pac::RCC_BASE + pac::RCC_PLLCFGR_OFFSET;
 
 const DIAG_ADDR: u32 = 0x200A0500;
 
@@ -198,7 +199,8 @@ struct Delay {
 }
 impl Delay {
     fn ms(ms: u32) -> Self {
-        let ticks = HCLK / 1000 * ms;
+        let hclk = unsafe { pac::HCLK };
+        let ticks = hclk / 1000 * ms;
         TICK_EXPIRED.clear();
         unsafe {
             write_volatile(
@@ -207,7 +209,8 @@ impl Delay {
             );
             write_volatile(STK_CNT as *mut u32, 0);
             write_volatile(STK_CMP as *mut u32, ticks);
-            write_volatile(STK_CTLR as *mut u32, (1 << 2) | (1 << 1) | (1 << 0)); // one-shot
+            write_volatile(STK_CTLR as *mut u32, (1 << 2) | (1 << 1) | (1 << 0));
+            // one-shot
         }
         Self { _until: ticks }
     }
@@ -291,7 +294,9 @@ fn run<F: Future>(f: F) -> F::Output {
         if TICK_EXPIRED.load() {
             continue;
         }
-        unsafe { core::arch::asm!("wfi"); }
+        unsafe {
+            core::arch::asm!("wfi");
+        }
     }
 }
 
@@ -306,8 +311,30 @@ fn systick_interrupt_enable() {
     }
 }
 
+/// Ensure system clock is HSI 25MHz, regardless of debugger state.
+/// Debug probes (wlink/probe-rs) may leave PLL/HSE configured after flashing.
+/// This forces a switch back to HSI so Delay::ms() timing is always correct.
+fn clock_init() {
+    unsafe {
+        // Gate off PLL from system clock mux
+        write_volatile(
+            RCC_PLLCFGR as *mut u32,
+            read_volatile(RCC_PLLCFGR as *const u32) & !pac::RCC_PLLCFGR_SYSPLL_GATE,
+        );
+        // Switch system clock to HSI, reset prescalers to /1
+        // Debugger may have set HPRE or FPRE to non-1 values (e.g. FPRE=/4 for V3F)
+        let mut cfgr = read_volatile(RCC_CFGR0 as *const u32);
+        cfgr &= !0x3u32; // SW=HSI
+        cfgr &= !(0xFFu32 | (0x3 << 16)); // HPRE=/1, FPRE=/1
+        write_volatile(RCC_CFGR0 as *mut u32, cfgr);
+        while read_volatile(RCC_CFGR0 as *const u32) & 0xCu32 != 0x00 {} // wait SWS=HSI
+                                                                         // HCLK = HSI = 25MHz (pac::HCLK already defaults to HSI_VALUE)
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
+    clock_init();
     rtt::init();
     rtt::write_str("[BOOT] CH32H417 V3F booted\n");
     systick_interrupt_enable();

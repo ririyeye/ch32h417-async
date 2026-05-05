@@ -78,6 +78,24 @@ pub const RCC_CFGR0_SWS_HSE: u32 = 0x01 << 2;
 pub const RCC_CFGR0_SWS_PLL: u32 = 0x02 << 2;
 pub const RCC_CFGR0_HPRE_DIV1: u32 = 0x00 << 4;
 pub const RCC_CFGR0_FPRE_DIV1: u32 = 0x00 << 16;
+pub const RCC_CFGR0_FPRE_DIV4: u32 = 0x03 << 16;
+
+// ── RCC PLLCFGR bits ────────────────────────────────────────────
+
+pub const RCC_PLLCFGR_PLLMUL_MASK: u32 = 0x1F;
+pub const RCC_PLLCFGR_PLLSRC_MASK: u32 = 0xE0;
+pub const RCC_PLLCFGR_PLLSRC_HSI: u32 = 0x00;
+pub const RCC_PLLCFGR_PLLSRC_HSE: u32 = 0x01 << 5;
+pub const RCC_PLLCFGR_PLL_SRC_DIV_MASK: u32 = 0x3F00;
+pub const RCC_PLLCFGR_PLL_SRC_DIV1: u32 = 0x0000;
+pub const RCC_PLLCFGR_SYSPLL_SEL_MASK: u32 = 0x7000_0000;
+pub const RCC_PLLCFGR_SYSPLL_GATE: u32 = 0x8000_0000;
+
+// ── FLASH ───────────────────────────────────────────────────────
+
+pub const FLASH_BASE: u32 = 0x4002_2000;
+pub const FLASH_ACTLR_OFFSET: u32 = 0x00;
+pub const FLASH_ACTLR_SCK_CFG_HCLK_DIV2: u32 = 0x01;
 
 // ── RCC HB2PCENR bits ───────────────────────────────────────────
 
@@ -112,7 +130,7 @@ pub const STK_CTLR_STRE: u32 = 1 << 3; // 1 = one-shot, 0 = auto-reload
 pub const STK0_ISR_ST0: u32 = 1 << 0; // SysTick0 flag
 pub const STK0_ISR_ST1: u32 = 1 << 1; // SysTick1 flag (in SysTick0.ISR!)
 
-pub const PFIC_SCTLR: u32 = PFIC_BASE + 0xDA0; // System Control Register
+pub const PFIC_SCTLR: u32 = PFIC_BASE + 0xD10; // System Control Register
                                                // SCTLR bits
 pub const SCTLR_WFITOWFE: u32 = 1 << 3; // 0=WFI, 1=WFE
 pub const SCTLR_SEVONPEND: u32 = 1 << 4; // Send Event on Pending
@@ -155,7 +173,7 @@ pub const V5F_INTSYSCR_VAL: u32 = 0x0F; // HPE + nesting + 5~8 levels
 // ── Clock constants ─────────────────────────────────────────────
 
 pub const HSI_VALUE: u32 = 25_000_000;
-pub const HSE_VALUE: u32 = 25_000_000;
+pub const HSE_VALUE: u32 = 12_000_000;
 
 /// Current HCLK frequency. Set by clock init.
 pub static mut HCLK: u32 = HSI_VALUE;
