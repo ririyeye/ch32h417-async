@@ -6,7 +6,7 @@ use core::cell::UnsafeCell;
 use core::future::Future;
 use core::pin::Pin;
 use core::ptr::{read_volatile, write_volatile};
-use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use core::task::{Context, Poll, Waker};
 
 use qingke_rt_macros::interrupt;
 
@@ -122,12 +122,10 @@ default_handler:
 const RCC_HB2PCENR: u32 = pac::RCC_BASE + pac::RCC_HB2PCENR_OFFSET;
 const GPIOC_BASE: u32 = pac::GPIOC_BASE;
 const GPIOC_CFGLR: u32 = GPIOC_BASE + pac::GPIO_CFGLR_OFFSET;
-const GPIOC_BSHR: u32 = GPIOC_BASE + pac::GPIO_BSHR_OFFSET;
+const GPIOC_OUTDR: u32 = GPIOC_BASE + pac::GPIO_OUTDR_OFFSET;
 const GPIOC_SPEED: u32 = GPIOC_BASE + pac::GPIO_SPEED_OFFSET;
-const PC2_SET: u32 = 1 << 2;
-const PC2_RST: u32 = 1 << (16 + 2);
-const PC3_SET: u32 = 1 << 3;
-const PC3_RST: u32 = 1 << (16 + 3);
+const PC2_OUT: u32 = 1 << 2;
+const PC3_OUT: u32 = 1 << 3;
 
 // SysTick0 (V3F core timer)
 const STK_CTLR: u32 = pac::SYSTICK0_BASE + pac::STK_CTLR_OFFSET;
@@ -140,12 +138,16 @@ const RCC_PLLCFGR: u32 = pac::RCC_BASE + pac::RCC_PLLCFGR_OFFSET;
 
 const DIAG_ADDR: u32 = 0x200A0500;
 
-// ── Tick flag ────────────────────────────────────────────────
+// ── Tick flag + waker (ISR ↔ Delay future) ──────────────
 
 struct TickFlag(UnsafeCell<bool>);
 unsafe impl Sync for TickFlag {}
 
 static TICK_EXPIRED: TickFlag = TickFlag(UnsafeCell::new(false));
+
+struct DelayWaker(UnsafeCell<Option<Waker>>);
+unsafe impl Sync for DelayWaker {}
+static DELAY_WAKER: DelayWaker = DelayWaker(UnsafeCell::new(None));
 
 impl TickFlag {
     fn set(&self) {
@@ -158,9 +160,6 @@ impl TickFlag {
             write_volatile(self.0.get(), false);
         }
     }
-    fn load(&self) -> bool {
-        unsafe { read_volatile(self.0.get()) }
-    }
     fn swap_clear(&self) -> bool {
         unsafe {
             let old = read_volatile(self.0.get());
@@ -170,7 +169,7 @@ impl TickFlag {
     }
 }
 
-// ── SysTick0 handler (HPE saves caller-saved regs; macro saves ra) ─
+// ── SysTick0 handler ─────────────────────────────────────
 
 #[interrupt]
 fn SysTick0_Handler() {
@@ -181,59 +180,65 @@ fn SysTick0_Handler() {
         }
     }
     TICK_EXPIRED.set();
+    // Wake the task that's waiting on Delay
+    unsafe {
+        if let Some(waker) = (*DELAY_WAKER.0.get()).as_ref() {
+            waker.wake_by_ref();
+        }
+    }
 }
 
-// ── Waker ────────────────────────────────────────────────────
-
-static VTABLE: RawWakerVTable = RawWakerVTable::new(
-    |_| RawWaker::new(core::ptr::null(), &VTABLE),
-    |_| {},
-    |_| {},
-    |_| {},
-);
-
-// ── Delay ────────────────────────────────────────────────────
+// ── Delay (embassy-compatible waker chain) ───────────────
 
 struct Delay {
-    _until: u32,
+    ticks: u32,
+    started: bool,
 }
+
 impl Delay {
     fn ms(ms: u32) -> Self {
         let hclk = unsafe { pac::HCLK };
-        let ticks = hclk / 1000 * ms;
-        TICK_EXPIRED.clear();
-        unsafe {
-            write_volatile(
-                STK_ISR as *mut u32,
-                read_volatile(STK_ISR as *mut u32) & !(1 << 0),
-            );
-            write_volatile(STK_CNT as *mut u32, 0);
-            write_volatile(STK_CMP as *mut u32, ticks);
-            write_volatile(STK_CTLR as *mut u32, (1 << 2) | (1 << 1) | (1 << 0));
-            // one-shot
+        Self {
+            ticks: hclk / 1000 * ms,
+            started: false,
         }
-        Self { _until: ticks }
     }
 }
+
 impl Future for Delay {
     type Output = ();
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        let isr = unsafe { read_volatile(STK_ISR as *const u32) };
-        if TICK_EXPIRED.swap_clear() || (isr & (1 << 0) != 0) {
-            if isr & (1 << 0) != 0 {
-                unsafe {
-                    write_volatile(STK_ISR as *mut u32, isr & !(1 << 0));
-                }
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if !self.started {
+            self.started = true;
+            // Register waker so ISR can wake us
+            unsafe {
+                *DELAY_WAKER.0.get() = Some(cx.waker().clone());
             }
+            TICK_EXPIRED.clear();
+            unsafe {
+                write_volatile(
+                    STK_ISR as *mut u32,
+                    read_volatile(STK_ISR as *const u32) & !(1 << 0),
+                );
+                write_volatile(STK_CNT as *mut u32, 0);
+                write_volatile(STK_CMP as *mut u32, self.ticks);
+                write_volatile(STK_CTLR as *mut u32, (1 << 2) | (1 << 1) | (1 << 0));
+            }
+            Poll::Pending
+        } else if TICK_EXPIRED.swap_clear() {
             unsafe {
                 write_volatile(STK_CTLR as *mut u32, 0);
             }
             Poll::Ready(())
         } else {
+            unsafe {
+                *DELAY_WAKER.0.get() = Some(cx.waker().clone());
+            }
             Poll::Pending
         }
     }
 }
+
 impl Drop for Delay {
     fn drop(&mut self) {
         unsafe {
@@ -242,7 +247,7 @@ impl Drop for Delay {
     }
 }
 
-// ── Blink ────────────────────────────────────────────────────
+// ── Blink ────────────────────────────────────────────────
 
 async fn blink() {
     rtt::write_str("[BOOT] blink starting\n");
@@ -269,10 +274,10 @@ async fn blink() {
         unsafe {
             write_volatile(DIAG_ADDR as *mut u32, tick);
             if tick & 1 != 0 {
-                write_volatile(GPIOC_BSHR as *mut u32, PC2_SET | PC3_RST);
+                write_volatile(GPIOC_OUTDR as *mut u32, PC2_OUT);
                 rtt::write_str("[LED] on\n");
             } else {
-                write_volatile(GPIOC_BSHR as *mut u32, PC2_RST | PC3_SET);
+                write_volatile(GPIOC_OUTDR as *mut u32, PC3_OUT);
                 rtt::write_str("[LED] off\n");
             }
         }
@@ -280,18 +285,36 @@ async fn blink() {
     }
 }
 
-// ── Executor ─────────────────────────────────────────────────
+// ── Executor ─────────────────────────────────────────────
+//
+//  Uses a proper waker chain: Delay stores cx.waker() → ISR calls
+//  waker.wake_by_ref() → task re-polled. This matches how embassy's
+//  waker works, just without the multi-task run-queue.
 
 fn run<F: Future>(f: F) -> F::Output {
     let mut f = f;
     let mut pinned = unsafe { Pin::new_unchecked(&mut f) };
     loop {
-        let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) };
+        // Build a real waker that stores itself in DELAY_WAKER
+        // (Delay::poll will overwrite it with cx.waker())
+        let waker = unsafe {
+            Waker::from_raw(core::task::RawWaker::new(
+                core::ptr::null(),
+                &core::task::RawWakerVTable::new(
+                    |_| core::task::RawWaker::new(core::ptr::null(), &VTABLE),
+                    |_| {},
+                    |_| {},
+                    |_| {},
+                ),
+            ))
+        };
         let mut cx = Context::from_waker(&waker);
         if let Poll::Ready(v) = pinned.as_mut().poll(&mut cx) {
             return v;
         }
-        if TICK_EXPIRED.load() {
+        // WFI — but first check if tick already expired
+        // (ISR may have fired between poll and check)
+        if TICK_EXPIRED.swap_clear() {
             continue;
         }
         unsafe {
@@ -300,35 +323,35 @@ fn run<F: Future>(f: F) -> F::Output {
     }
 }
 
+static VTABLE: core::task::RawWakerVTable = core::task::RawWakerVTable::new(
+    |_| core::task::RawWaker::new(core::ptr::null(), &VTABLE),
+    |_| {},
+    |_| {},
+    |_| {},
+);
+
+// ── Init ─────────────────────────────────────────────────
+
 fn systick_interrupt_enable() {
     unsafe {
-        // Set priority 0 for SysTick0 (like C SDK: NVIC_SetPriority(SysTick0_IRQn, 0))
         let prio_addr = (pac::PFIC_IPRIOR_BASE + pac::SYSTICK0_IRQN as u32) as *mut u8;
         write_volatile(prio_addr, 0u8);
-        // SysTick0 = IRQ 12 (V3F core timer)
         write_volatile(pac::PFIC_IENR1 as *mut u32, 1 << pac::SYSTICK0_IRQN);
         core::arch::asm!("csrs 0x800, {}", in(reg) 0x88u32);
     }
 }
 
-/// Ensure system clock is HSI 25MHz, regardless of debugger state.
-/// Debug probes (wlink/probe-rs) may leave PLL/HSE configured after flashing.
-/// This forces a switch back to HSI so Delay::ms() timing is always correct.
 fn clock_init() {
     unsafe {
-        // Gate off PLL from system clock mux
         write_volatile(
             RCC_PLLCFGR as *mut u32,
             read_volatile(RCC_PLLCFGR as *const u32) & !pac::RCC_PLLCFGR_SYSPLL_GATE,
         );
-        // Switch system clock to HSI, reset prescalers to /1
-        // Debugger may have set HPRE or FPRE to non-1 values (e.g. FPRE=/4 for V3F)
         let mut cfgr = read_volatile(RCC_CFGR0 as *const u32);
-        cfgr &= !0x3u32; // SW=HSI
-        cfgr &= !(0xFFu32 | (0x3 << 16)); // HPRE=/1, FPRE=/1
+        cfgr &= !0x3u32;
+        cfgr &= !(0xFFu32 | (0x3 << 16));
         write_volatile(RCC_CFGR0 as *mut u32, cfgr);
-        while read_volatile(RCC_CFGR0 as *const u32) & 0xCu32 != 0x00 {} // wait SWS=HSI
-                                                                         // HCLK = HSI = 25MHz (pac::HCLK already defaults to HSI_VALUE)
+        while read_volatile(RCC_CFGR0 as *const u32) & 0xCu32 != 0x00 {}
     }
 }
 
