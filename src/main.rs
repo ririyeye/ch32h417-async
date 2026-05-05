@@ -10,6 +10,7 @@ use core::task::{Context, Poll, Waker};
 
 use qingke_rt_macros::interrupt;
 
+mod atomic;
 mod pac;
 mod rtt;
 

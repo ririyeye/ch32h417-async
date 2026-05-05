@@ -1,6 +1,10 @@
 [build]
-target = "riscv32imac-unknown-none-elf"
+target = "riscv32imac_ch32h417.json"
 
-[target.riscv32imac-unknown-none-elf]
+[unstable]
+build-std = ["core"]
+json-target-spec = true
+
+[target.riscv32imac_ch32h417]
 rustflags = ["-C", "link-arg=-Tmemory.x"]
 runner = ["py", "run.py"]
