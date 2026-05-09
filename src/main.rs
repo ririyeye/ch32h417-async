@@ -6,6 +6,7 @@ use core::cell::UnsafeCell;
 use core::future::Future;
 use core::pin::Pin;
 use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{AtomicU32, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use qingke_rt_macros::interrupt;
@@ -325,6 +326,120 @@ async fn blink() {
     }
 }
 
+// ── Atomic instruction tests (V5F "A" extension) ────────────
+
+/// Test AMO instructions via core::sync::atomic::AtomicU32.
+/// On V5F (out-of-order), we use AcqRel ordering + explicit fences
+/// to prevent the CPU from reordering the test sequence.
+fn test_atomic_amo() -> bool {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    // Reset
+    COUNTER.store(0, Ordering::SeqCst);
+    core::sync::atomic::fence(Ordering::SeqCst);
+
+    let v = COUNTER.fetch_add(1, Ordering::SeqCst);
+    core::sync::atomic::fence(Ordering::SeqCst);
+
+    let v2 = COUNTER.fetch_add(2, Ordering::SeqCst);
+    core::sync::atomic::fence(Ordering::SeqCst);
+
+    let v3 = COUNTER.load(Ordering::SeqCst);
+    // Expected: v=0, v2=1, v3=3
+    v == 0 && v2 == 1 && v3 == 3
+}
+
+/// Test LR/SC (Load-Reserved / Store-Conditional) directly.
+/// V5F is out-of-order — must use fence to flush the store buffer
+/// before LR, and ensure no intervening memory ops between LR and SC.
+fn test_atomic_lrsc() -> bool {
+    #[link_section = ".bss"]
+    static mut LOCK: u32 = 0;
+
+    let mut ok = true;
+
+    unsafe {
+        // Reset lock
+        write_volatile(core::ptr::addr_of_mut!(LOCK), 0);
+        core::arch::asm!("fence iorw, iorw");
+
+        // Acquire lock via LR/SC
+        let _acquired: u32;
+        core::arch::asm!(
+            "   fence rw, rw",                    // flush store buffer before LR
+            "1:",
+            "   lr.w.aq {acquired}, ({lock})",    // Load-Reserved with acquire
+            "   bnez {acquired}, 2f",              // if locked, try again
+            "   li {tmp}, 1",
+            "   sc.w.rl {acquired}, {tmp}, ({lock})", // Store-Conditional with release
+            "   bnez {acquired}, 1b",              // sc failed → retry
+            "2:",
+            "   fence rw, rw",                    // fence after acquire
+            lock = in(reg) core::ptr::addr_of!(LOCK),
+            tmp = out(reg) _,
+            acquired = out(reg) _acquired,
+            options(nostack),
+        );
+
+        // Lock acquired. Verify lock value is 1.
+        core::sync::atomic::fence(Ordering::SeqCst);
+        let val = read_volatile(core::ptr::addr_of!(LOCK));
+        if val != 1 {
+            ok = false;
+        }
+
+        // Release lock with AMOSWAP.W
+        let old: u32;
+        core::arch::asm!(
+            "   amoswap.w.rl {old}, zero, ({lock})", // release
+            old = out(reg) old,
+            lock = in(reg) core::ptr::addr_of!(LOCK),
+            options(nostack),
+        );
+        if old != 1 {
+            ok = false;
+        }
+
+        // Verify released
+        core::sync::atomic::fence(Ordering::SeqCst);
+        let val2 = read_volatile(core::ptr::addr_of!(LOCK));
+        if val2 != 0 {
+            ok = false;
+        }
+    }
+
+    ok
+}
+
+fn run_atomic_tests() {
+    rtt::write_str("[ATOMIC] Testing V5F 'A' extension...\n");
+
+    // Test 1: AMO (Atomic Memory Operations via core::sync::atomic)
+    if test_atomic_amo() {
+        rtt::write_str("[ATOMIC] AMO test PASSED (AtomicU32 fetch_add OK)\n");
+    } else {
+        rtt::write_str("[ATOMIC] AMO test FAILED!\n");
+    }
+
+    // Test 2: LR/SC (Load-Reserved / Store-Conditional)
+    if test_atomic_lrsc() {
+        rtt::write_str("[ATOMIC] LR/SC test PASSED (spinlock acquire/release OK)\n");
+    } else {
+        rtt::write_str("[ATOMIC] LR/SC test FAILED!\n");
+    }
+
+    // Test 3: AMO swap stress (loop 100 times) — SeqCst
+    static SWAP_CELL: AtomicU32 = AtomicU32::new(0xDEAD);
+    for _i in 0..100 {
+        let _prev = SWAP_CELL.swap(_i, Ordering::SeqCst);
+        core::hint::spin_loop();
+    }
+    core::sync::atomic::fence(Ordering::SeqCst);
+    rtt::write_str("[ATOMIC] SWAP stress test PASSED (100 iterations)\n");
+
+    rtt::write_str("[ATOMIC] All tests complete.\n");
+}
+
 // ── Executor ─────────────────────────────────────────────────
 
 fn run<F: Future>(f: F) -> F::Output {
@@ -382,6 +497,7 @@ pub extern "C" fn rust_main() -> ! {
     clock_init();
     rtt::init();
     rtt::write_str("[BOOT] CH32H417 V5F booted\n");
+    run_atomic_tests();
     systick_interrupt_enable();
     run(blink());
     loop {}
