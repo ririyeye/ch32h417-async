@@ -65,13 +65,19 @@ pub fn write_str(s: &str) {
         let cb = &raw mut _SEGGER_RTT;
         let ch = &raw mut (*cb).up_channel;
         for &b in s.as_bytes() {
-            let next = ((*ch).write + 1) % (*ch).size;
-            if next == (*ch).read {
+            let write = core::ptr::read_volatile(&(*ch).write);
+            let read = core::ptr::read_volatile(&(*ch).read);
+            let next = (write + 1) % (*ch).size;
+            if next == read {
                 break;
             }
-            *(*ch).buffer.add((*ch).write as usize) = b;
-            (*ch).write = next;
+            core::ptr::write_volatile((*ch).buffer.add(write as usize), b);
+            // Fence before updating write pointer on OoO cores (V5F)
+            core::arch::asm!("fence w, w");
+            core::ptr::write_volatile(&raw mut (*ch).write, next);
         }
+        // Drain store buffer to make writes visible to debug probe
+        core::arch::asm!("fence iorw, iorw");
     }
 }
 

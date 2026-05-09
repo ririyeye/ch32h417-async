@@ -2,17 +2,19 @@
 #![no_main]
 
 use core::arch::global_asm;
-use core::cell::UnsafeCell;
 use core::future::Future;
 use core::pin::Pin;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
+use embassy_time::{Duration, Timer};
 use qingke_rt_macros::interrupt;
 
 mod pac;
 mod rtt;
+mod time_driver;
+mod critical_impl;
 
 use panic_halt as _;
 
@@ -169,63 +171,16 @@ const PC2_RST: u32 = 1 << (16 + 2);
 const PC3_SET: u32 = 1 << 3;
 const PC3_RST: u32 = 1 << (16 + 3);
 
-// SysTick1 (V5F core timer, at 0xE000_F080)
-// NOTE: SysTick1 counter overflow flag is in SysTick0.ISR bit 1,
-// NOT in SysTick1's own ISR register (per C SDK hardware.c).
-const STK1_CTLR: u32 = pac::SYSTICK1_BASE + pac::STK_CTLR_OFFSET;
-const STK1_CNT: u32  = pac::SYSTICK1_BASE + pac::STK_CNT_OFFSET;
-const STK1_CMP: u32  = pac::SYSTICK1_BASE + pac::STK_CMP_OFFSET;
-// SysTick0.ISR holds flags for both SysTick0 (bit 0) and SysTick1 (bit 1)
-const STK0_ISR: u32  = pac::SYSTICK0_BASE + pac::STK_ISR_OFFSET;
-const STK_ISR_ST1: u32 = 1 << 1;  // SysTick1 flag in SysTick0.ISR
-
 const RCC_CFGR0: u32 = pac::RCC_BASE + pac::RCC_CFGR0_OFFSET;
 const RCC_PLLCFGR: u32 = pac::RCC_BASE + pac::RCC_PLLCFGR_OFFSET;
 
 const DIAG_ADDR: u32 = 0x200A0500;
 
-// ── Tick flag ────────────────────────────────────────────────
-
-struct TickFlag(UnsafeCell<bool>);
-unsafe impl Sync for TickFlag {}
-
-static TICK_EXPIRED: TickFlag = TickFlag(UnsafeCell::new(false));
-
-impl TickFlag {
-    fn set(&self) {
-        unsafe {
-            write_volatile(self.0.get(), true);
-        }
-    }
-    fn clear(&self) {
-        unsafe {
-            write_volatile(self.0.get(), false);
-        }
-    }
-    fn load(&self) -> bool {
-        unsafe { read_volatile(self.0.get()) }
-    }
-    fn swap_clear(&self) -> bool {
-        unsafe {
-            let old = read_volatile(self.0.get());
-            write_volatile(self.0.get(), false);
-            old
-        }
-    }
-}
-
-// ── SysTick1 handler (V5F core timer, IRQ 13) ─
-// ISR flag for SysTick1 is in SysTick0.ISR bit 1 (per C SDK)
+// ── SysTick1 handler → embassy time driver ──────────────────
 
 #[interrupt]
 fn SysTick1_Handler() {
-    let isr = unsafe { read_volatile(STK0_ISR as *const u32) };
-    if isr & STK_ISR_ST1 != 0 {
-        unsafe {
-            write_volatile(STK0_ISR as *mut u32, isr & !STK_ISR_ST1);
-        }
-    }
-    TICK_EXPIRED.set();
+    time_driver::on_interrupt();
 }
 
 // ── Waker ────────────────────────────────────────────────────
@@ -237,76 +192,16 @@ static VTABLE: RawWakerVTable = RawWakerVTable::new(
     |_| {},
 );
 
-// ── Delay ────────────────────────────────────────────────────
-
-struct Delay {
-    _until: u32,
-}
-impl Delay {
-    fn ms(ms: u32) -> Self {
-        let hclk = unsafe { pac::HCLK };
-        let ticks = hclk / 1000 * ms;
-        TICK_EXPIRED.clear();
-        unsafe {
-            write_volatile(
-                STK0_ISR as *mut u32,
-                read_volatile(STK0_ISR as *mut u32) & !STK_ISR_ST1,
-            );
-            write_volatile(STK1_CNT as *mut u32, 0);
-            write_volatile(STK1_CMP as *mut u32, ticks);
-            // CTLR=0x0F: EN | IE | NO_RTC(HCLK) | AUTO_RELOAD
-            // (matches C SDK SYSTICK_Init_Config for V5F)
-            write_volatile(STK1_CTLR as *mut u32, 0x0F);
-        }
-        Self { _until: ticks }
-    }
-}
-impl Future for Delay {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        let isr = unsafe { read_volatile(STK0_ISR as *const u32) };
-        if TICK_EXPIRED.swap_clear() || (isr & STK_ISR_ST1 != 0) {
-            if isr & STK_ISR_ST1 != 0 {
-                unsafe {
-                    write_volatile(STK0_ISR as *mut u32, isr & !STK_ISR_ST1);
-                }
-            }
-            unsafe {
-                write_volatile(STK1_CTLR as *mut u32, 0);
-            }
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    }
-}
-impl Drop for Delay {
-    fn drop(&mut self) {
-        unsafe {
-            write_volatile(STK1_CTLR as *mut u32, 0);
-        }
-    }
-}
-
-// ── Blink ────────────────────────────────────────────────────
+// ── Blink (uses embassy-time::Timer) ─────────────────────────
 
 async fn blink() {
     rtt::write_str("[BOOT] blink starting\n");
     unsafe {
-        write_volatile(
-            RCC_HB2PCENR as *mut u32,
-            read_volatile(RCC_HB2PCENR as *mut u32) | 0x10,
-        );
+        write_volatile(RCC_HB2PCENR as *mut u32, read_volatile(RCC_HB2PCENR as *mut u32) | 0x10);
         let c = GPIOC_CFGLR as *mut u32;
-        write_volatile(
-            c,
-            (read_volatile(c) & !(0xFF << 8)) | (0x1 << 8) | (0x1 << 12),
-        );
+        write_volatile(c, (read_volatile(c) & !(0xFF << 8)) | (0x1 << 8) | (0x1 << 12));
         let s = GPIOC_SPEED as *mut u32;
-        write_volatile(
-            s,
-            (read_volatile(s) & !(0xF << 4)) | (0x3 << 4) | (0x3 << 6),
-        );
+        write_volatile(s, (read_volatile(s) & !(0xF << 4)) | (0x3 << 4) | (0x3 << 6));
     }
 
     let mut tick: u32 = 0;
@@ -322,7 +217,7 @@ async fn blink() {
                 rtt::write_str("[LED] off\n");
             }
         }
-        Delay::ms(1000).await;
+        Timer::after(Duration::from_millis(1000)).await;
     }
 }
 
@@ -451,9 +346,6 @@ fn run<F: Future>(f: F) -> F::Output {
         if let Poll::Ready(v) = pinned.as_mut().poll(&mut cx) {
             return v;
         }
-        if TICK_EXPIRED.load() {
-            continue;
-        }
         unsafe {
             core::arch::asm!("wfi");
         }
@@ -497,8 +389,19 @@ pub extern "C" fn rust_main() -> ! {
     clock_init();
     rtt::init();
     rtt::write_str("[BOOT] CH32H417 V5F booted\n");
+
+    // Initialize embassy time driver
+    critical_section::with(|cs| {
+        time_driver::init(cs);
+    });
+
     run_atomic_tests();
     systick_interrupt_enable();
+
+    rtt::write_str("[EMBASSY] Time driver ready, starting blink\n");
+
+    rtt::write_str("[EMBASSY] Time driver ready, starting blink\n");
+
     run(blink());
     loop {}
 }

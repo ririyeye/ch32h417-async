@@ -10,6 +10,13 @@ exclude = ["ch32-hal", "embassy"]
 [dependencies]
 panic-halt = "0.2.0"
 qingke-rt-macros = "0.6.1"
+critical-section = { version = "1.2.0", features = ["restore-state-u8"] }
+
+# Embassy crates (local paths)
+embassy-time = { path = "embassy/embassy-time", features = ["generic-queue-8"] }
+embassy-time-driver = { path = "embassy/embassy-time-driver" }
+embassy-time-queue-utils = { path = "embassy/embassy-time-queue-utils" }
+embassy-sync = { path = "embassy/embassy-sync" }
 
 [profile.release]
 panic = "abort"
