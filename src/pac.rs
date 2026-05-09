@@ -116,7 +116,7 @@ pub const RCC_HB1PCENR_USART3: u32 = 1 << 18;
 // ── SysTick registers (per-core) ────────────────────────────────
 
 pub const STK_CTLR_OFFSET: u32 = 0x00;
-pub const STK_ISR_OFFSET: u32 = 0x04; // only SysTick0.ISR is valid
+pub const STK_ISR_OFFSET: u32 = 0x04;    // valid for both SysTick0 and SysTick1
 pub const STK_CNT_OFFSET: u32 = 0x08;
 pub const STK_CMP_OFFSET: u32 = 0x10;
 

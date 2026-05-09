@@ -22,14 +22,23 @@ global_asm!(
 .section .init, "ax"
 .globl _start
 _start:
+    csrr t0, mhartid
+
+    beqz t0, .Lhart0_init      # Hart 0 = V3F (C0) → WFI sleep
+
+    # ── Hart 1 (V5F core, C1) ──────────────────────────
     la sp, _stack_start
+
+    # Clear .bss
     la t0, _sbss
     la t1, _ebss
 1:  beq t0, t1, 2f
     sw  zero, 0(t0)
     addi t0, t0, 4
     j   1b
-2:  la t0, _sdata
+2:
+    # Copy .data from flash to RAM
+    la t0, _sdata
     la t1, _edata
     la t2, _sidata
 3:  beq t0, t1, 4f
@@ -40,13 +49,14 @@ _start:
     j   3b
 4:
 
-    li t0, 0x123703e1
+    # V5F-specific CSR setup
+    li t0, 0x1237B3E0
     csrw 0xbc0, t0
 
-    li t0, 0x01
+    li t0, 0x07
     csrw 0xbc1, t0
 
-    li t0, 0x07
+    li t0, 0x0F
     csrw 0x804, t0
 
     li t0, 0x6088
@@ -57,6 +67,35 @@ _start:
     csrw mtvec, t0
 
     jal zero, rust_main
+    # never returns
+
+    # ── Hart 0 (V3F core, C0) ──────────────────────────
+.Lhart0_init:
+    la sp, _stack_hart1
+
+    # V3F-specific CSR setup (minimal)
+    li t0, 0x123703E1
+    csrw 0xbc0, t0
+
+    li t0, 0x01
+    csrw 0xbc1, t0
+
+    li t0, 0x07
+    csrw 0x804, t0
+
+    # Disable global interrupts on V3F
+    li t0, 0x88
+    csrc 0x800, t0
+
+    # Set mtvec to a dummy loop handler
+    la t0, .Lhart0_loop
+    ori t0, t0, 3
+    csrw mtvec, t0
+
+    # V3F: infinite WFI loop
+.Lhart0_loop:
+    wfi
+    j .Lhart0_loop
 "#
 );
 
@@ -81,8 +120,8 @@ _vector_base:
     .word   default_handler
     .word   0
     .word   0
-    .word   SysTick0_Handler
     .word   default_handler
+    .word   SysTick1_Handler
     .word   default_handler
     .word   0
     .word   default_handler
@@ -129,11 +168,15 @@ const PC2_RST: u32 = 1 << (16 + 2);
 const PC3_SET: u32 = 1 << 3;
 const PC3_RST: u32 = 1 << (16 + 3);
 
-// SysTick0 (V3F core timer)
-const STK_CTLR: u32 = pac::SYSTICK0_BASE + pac::STK_CTLR_OFFSET;
-const STK_CNT: u32 = pac::SYSTICK0_BASE + pac::STK_CNT_OFFSET;
-const STK_CMP: u32 = pac::SYSTICK0_BASE + pac::STK_CMP_OFFSET;
-const STK_ISR: u32 = pac::SYSTICK0_BASE + pac::STK_ISR_OFFSET;
+// SysTick1 (V5F core timer, at 0xE000_F080)
+// NOTE: SysTick1 counter overflow flag is in SysTick0.ISR bit 1,
+// NOT in SysTick1's own ISR register (per C SDK hardware.c).
+const STK1_CTLR: u32 = pac::SYSTICK1_BASE + pac::STK_CTLR_OFFSET;
+const STK1_CNT: u32  = pac::SYSTICK1_BASE + pac::STK_CNT_OFFSET;
+const STK1_CMP: u32  = pac::SYSTICK1_BASE + pac::STK_CMP_OFFSET;
+// SysTick0.ISR holds flags for both SysTick0 (bit 0) and SysTick1 (bit 1)
+const STK0_ISR: u32  = pac::SYSTICK0_BASE + pac::STK_ISR_OFFSET;
+const STK_ISR_ST1: u32 = 1 << 1;  // SysTick1 flag in SysTick0.ISR
 
 const RCC_CFGR0: u32 = pac::RCC_BASE + pac::RCC_CFGR0_OFFSET;
 const RCC_PLLCFGR: u32 = pac::RCC_BASE + pac::RCC_PLLCFGR_OFFSET;
@@ -170,14 +213,15 @@ impl TickFlag {
     }
 }
 
-// ── SysTick0 handler (HPE saves caller-saved regs; macro saves ra) ─
+// ── SysTick1 handler (V5F core timer, IRQ 13) ─
+// ISR flag for SysTick1 is in SysTick0.ISR bit 1 (per C SDK)
 
 #[interrupt]
-fn SysTick0_Handler() {
-    let isr = unsafe { read_volatile(STK_ISR as *const u32) };
-    if isr & (1 << 0) != 0 {
+fn SysTick1_Handler() {
+    let isr = unsafe { read_volatile(STK0_ISR as *const u32) };
+    if isr & STK_ISR_ST1 != 0 {
         unsafe {
-            write_volatile(STK_ISR as *mut u32, isr & !(1 << 0));
+            write_volatile(STK0_ISR as *mut u32, isr & !STK_ISR_ST1);
         }
     }
     TICK_EXPIRED.set();
@@ -204,13 +248,14 @@ impl Delay {
         TICK_EXPIRED.clear();
         unsafe {
             write_volatile(
-                STK_ISR as *mut u32,
-                read_volatile(STK_ISR as *mut u32) & !(1 << 0),
+                STK0_ISR as *mut u32,
+                read_volatile(STK0_ISR as *mut u32) & !STK_ISR_ST1,
             );
-            write_volatile(STK_CNT as *mut u32, 0);
-            write_volatile(STK_CMP as *mut u32, ticks);
-            write_volatile(STK_CTLR as *mut u32, (1 << 2) | (1 << 1) | (1 << 0));
-            // one-shot
+            write_volatile(STK1_CNT as *mut u32, 0);
+            write_volatile(STK1_CMP as *mut u32, ticks);
+            // CTLR=0x0F: EN | IE | NO_RTC(HCLK) | AUTO_RELOAD
+            // (matches C SDK SYSTICK_Init_Config for V5F)
+            write_volatile(STK1_CTLR as *mut u32, 0x0F);
         }
         Self { _until: ticks }
     }
@@ -218,15 +263,15 @@ impl Delay {
 impl Future for Delay {
     type Output = ();
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        let isr = unsafe { read_volatile(STK_ISR as *const u32) };
-        if TICK_EXPIRED.swap_clear() || (isr & (1 << 0) != 0) {
-            if isr & (1 << 0) != 0 {
+        let isr = unsafe { read_volatile(STK0_ISR as *const u32) };
+        if TICK_EXPIRED.swap_clear() || (isr & STK_ISR_ST1 != 0) {
+            if isr & STK_ISR_ST1 != 0 {
                 unsafe {
-                    write_volatile(STK_ISR as *mut u32, isr & !(1 << 0));
+                    write_volatile(STK0_ISR as *mut u32, isr & !STK_ISR_ST1);
                 }
             }
             unsafe {
-                write_volatile(STK_CTLR as *mut u32, 0);
+                write_volatile(STK1_CTLR as *mut u32, 0);
             }
             Poll::Ready(())
         } else {
@@ -237,7 +282,7 @@ impl Future for Delay {
 impl Drop for Delay {
     fn drop(&mut self) {
         unsafe {
-            write_volatile(STK_CTLR as *mut u32, 0);
+            write_volatile(STK1_CTLR as *mut u32, 0);
         }
     }
 }
@@ -302,11 +347,11 @@ fn run<F: Future>(f: F) -> F::Output {
 
 fn systick_interrupt_enable() {
     unsafe {
-        // Set priority 0 for SysTick0 (like C SDK: NVIC_SetPriority(SysTick0_IRQn, 0))
-        let prio_addr = (pac::PFIC_IPRIOR_BASE + pac::SYSTICK0_IRQN as u32) as *mut u8;
+        // Set priority 0 for SysTick1 (V5F core timer, IRQ 13)
+        let prio_addr = (pac::PFIC_IPRIOR_BASE + pac::SYSTICK1_IRQN as u32) as *mut u8;
         write_volatile(prio_addr, 0u8);
-        // SysTick0 = IRQ 12 (V3F core timer)
-        write_volatile(pac::PFIC_IENR1 as *mut u32, 1 << pac::SYSTICK0_IRQN);
+        // SysTick1 = IRQ 13 (V5F core timer)
+        write_volatile(pac::PFIC_IENR1 as *mut u32, 1 << pac::SYSTICK1_IRQN);
         core::arch::asm!("csrs 0x800, {}", in(reg) 0x88u32);
     }
 }
@@ -336,7 +381,7 @@ fn clock_init() {
 pub extern "C" fn rust_main() -> ! {
     clock_init();
     rtt::init();
-    rtt::write_str("[BOOT] CH32H417 V3F booted\n");
+    rtt::write_str("[BOOT] CH32H417 V5F booted\n");
     systick_interrupt_enable();
     run(blink());
     loop {}

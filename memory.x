@@ -5,6 +5,7 @@ MEMORY
 }
 
 _stack_start = ORIGIN(RAM) + LENGTH(RAM);
+_stack_hart1  = ORIGIN(RAM) + 256K;    /* V3F (hart 1) gets a small stack at mid-RAM */
 
 SECTIONS
 {

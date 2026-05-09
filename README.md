@@ -1,6 +1,7 @@
 # ch32h417-async
 
 Minimal async/await blink demo for **CH32H417** (QingKe-V5F RISC-V core) on the nanoCH32H417 dev board.
+The V5F core (hart 0) runs the LED blink; the V3F core (hart 1) goes into WFI sleep after boot (hartid dispatch in `_start`).
 
 Uses a **hand-written async runtime** — no embassy, no RTOS, no alloc.  
 Just Rust's built-in `Future` trait and a ~15-line polling executor.
@@ -35,17 +36,18 @@ at `../probe-rs/target/release/probe-rs` for flashing.
 ```
 ┌──────────────────────────────────────┐
 │ cargo run --release                  │
-│   └─ probe-rs download --chip CH32H417 │  ← flash + DMI ndmreset
+│   └─ probe-rs download --chip CH32H417 │  ← flash + DMI ndmreset (both harts)
 │        --chip-erase --binary-format elf │
 └──────────────────────────────────────┘
 
-┌──────────────────────────────────────┐
-│ _start (global_asm)                 │
-│   └─ rust_main()                    │
-│        └─ run(blink())  ← executor  │
-│             └─ blink()  ← async fn  │
-│                  └─ Delay::ms(500)  │
-└──────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│ _start (global_asm) → csrr mhartid               │
+│   ├─ hart 0 (V5F) → rust_main()                  │
+│   │    └─ run(blink())  ← executor (SysTick1)    │
+│   │         └─ blink()  ← async fn               │
+│   │              └─ Delay::ms(1000)               │
+│   └─ hart 1 (V3F) → WFI infinite loop (sleep)    │
+└──────────────────────────────────────────────────┘
 ```
 
 ### Custom async runtime
